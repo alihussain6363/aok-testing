@@ -5,6 +5,8 @@ import { useEffect } from 'react';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/components/useColorScheme';
+import { PlaybackProvider } from '@/context/PlaybackContext';
+import { PlaybackModals } from '@/components/PlaybackModals';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -39,7 +41,12 @@ export default function RootLayout() {
     return null;
   }
 
-  return <RootLayoutNav />;
+  return (
+    <PlaybackProvider>
+      <RootLayoutNav />
+      <PlaybackModals />
+    </PlaybackProvider>
+  );
 }
 
 function RootLayoutNav() {
