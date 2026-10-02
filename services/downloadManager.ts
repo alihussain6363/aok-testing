@@ -1,7 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Directory, File, Paths, type DownloadProgress } from 'expo-file-system';
+import { type MediaKind, detectMediaKind } from '@/services/googleDriveService';
 
-export interface LocalVideoItem {
+export interface LocalMediaItem {
   id: string;
   title: string;
   localUri: string;
@@ -10,15 +11,19 @@ export interface LocalVideoItem {
   remoteUrl: string;
   googleDriveId?: string;
   thumbnailUrl?: string;
+  mediaKind: MediaKind;
 }
 
-const STORAGE_INDEX_KEY = '@drive_player_videos_index';
+export type LocalVideoItem = LocalMediaItem;
+
+const STORAGE_INDEX_KEY = '@drive_player_media_index_v2';
+const LEGACY_STORAGE_INDEX_KEY = '@drive_player_videos_index';
 
 /**
- * Get or create the local videos directory in document storage.
+ * Get or create the local media directory in document storage.
  */
-function getVideosDirectory(): Directory {
-  const dir = new Directory(Paths.document, 'videos');
+function getMediaDirectory(folder: 'videos' | 'audio' | 'images' | 'media' = 'media'): Directory {
+  const dir = new Directory(Paths.document, folder);
   if (!dir.exists) {
     dir.create();
   }
@@ -26,11 +31,14 @@ function getVideosDirectory(): Directory {
 }
 
 /**
- * Clean a string to be used safely as a filename.
+ * Clean a string to be used safely as a filename with proper extension.
  */
-function sanitizeFileName(name: string): string {
+function sanitizeFileName(name: string, defaultExt: string): string {
   const clean = name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  return clean.endsWith('.mp4') ? clean : `${clean}.mp4`;
+  if (clean.includes('.')) {
+    return clean;
+  }
+  return `${clean}.${defaultExt}`;
 }
 
 /**
@@ -49,16 +57,30 @@ export function formatBytes(bytes?: number): string {
 }
 
 /**
- * Retrieves all registered local videos from AsyncStorage and verifies their file existence.
+ * Retrieves all registered local media items from device storage.
  */
-export async function getLocalVideos(): Promise<LocalVideoItem[]> {
+export async function getLocalMedia(): Promise<LocalMediaItem[]> {
   try {
-    const raw = await AsyncStorage.getItem(STORAGE_INDEX_KEY);
-    if (!raw) return [];
-    const items: LocalVideoItem[] = JSON.parse(raw);
+    let raw = await AsyncStorage.getItem(STORAGE_INDEX_KEY);
+    // Fallback to legacy index if new index is empty
+    if (!raw) {
+      const legacyRaw = await AsyncStorage.getItem(LEGACY_STORAGE_INDEX_KEY);
+      if (legacyRaw) {
+        const legacyItems = JSON.parse(legacyRaw);
+        const upgraded: LocalMediaItem[] = legacyItems.map((item: any) => ({
+          ...item,
+          mediaKind: item.mediaKind || 'video',
+        }));
+        await AsyncStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify(upgraded));
+        raw = JSON.stringify(upgraded);
+      }
+    }
 
-    // Verify which files still physically exist on disk
-    const validItems: LocalVideoItem[] = [];
+    if (!raw) return [];
+    const items: LocalMediaItem[] = JSON.parse(raw);
+
+    // Verify which files still physically exist on device storage
+    const validItems: LocalMediaItem[] = [];
     for (const item of items) {
       try {
         const file = new File(item.localUri);
@@ -79,38 +101,80 @@ export async function getLocalVideos(): Promise<LocalVideoItem[]> {
 
     return validItems;
   } catch (error) {
-    console.error('Error getting local videos:', error);
+    console.error('Error getting local media:', error);
     return [];
   }
 }
 
 /**
- * Checks if a specific video is already downloaded to local storage.
+ * Retrieves only local video items.
  */
-export async function findLocalVideo(idOrUrl: string): Promise<LocalVideoItem | null> {
-  const list = await getLocalVideos();
-  return list.find((v) => v.id === idOrUrl || v.remoteUrl === idOrUrl || v.googleDriveId === idOrUrl) || null;
+export async function getLocalVideos(): Promise<LocalMediaItem[]> {
+  const all = await getLocalMedia();
+  return all.filter((item) => item.mediaKind === 'video');
 }
 
 /**
- * Downloads a video from Google Drive / URL to local device storage with progress callback.
+ * Retrieves only local audio / music items.
  */
-export async function downloadVideoToLocal(
+export async function getLocalAudio(): Promise<LocalMediaItem[]> {
+  const all = await getLocalMedia();
+  return all.filter((item) => item.mediaKind === 'audio');
+}
+
+/**
+ * Retrieves only local image items.
+ */
+export async function getLocalImages(): Promise<LocalMediaItem[]> {
+  const all = await getLocalMedia();
+  return all.filter((item) => item.mediaKind === 'image');
+}
+
+/**
+ * Checks if a specific file is already downloaded to local device storage.
+ */
+export async function findLocalMedia(idOrUrl: string): Promise<LocalMediaItem | null> {
+  const list = await getLocalMedia();
+  return list.find((v) => v.id === idOrUrl || v.remoteUrl === idOrUrl || v.googleDriveId === idOrUrl) || null;
+}
+
+export const findLocalVideo = findLocalMedia;
+
+/**
+ * Downloads a media file (Video, Audio, or Image) from Google Drive / remote URL
+ * directly into device local storage with real-time progress callback.
+ */
+export async function downloadMediaToLocal(
   remoteUrl: string,
   title: string,
+  mediaKind: MediaKind = 'video',
   googleDriveId?: string,
   thumbnailUrl?: string,
   onProgress?: (progressPercent: number, bytesWritten: number, totalBytes: number) => void
-): Promise<LocalVideoItem> {
-  const videosDir = getVideosDirectory();
-  const safeName = `${Date.now()}_${sanitizeFileName(title)}`;
-  const destinationFile = new File(videosDir, safeName);
+): Promise<LocalMediaItem> {
+  const folder = mediaKind === 'video' ? 'videos' : mediaKind === 'audio' ? 'audio' : 'images';
+  const mediaDir = getMediaDirectory(folder);
+  const defaultExt = mediaKind === 'video' ? 'mp4' : mediaKind === 'audio' ? 'mp3' : 'jpg';
+  const safeName = `${Date.now()}_${sanitizeFileName(title, defaultExt)}`;
+  const destinationFile = new File(mediaDir, safeName);
 
   let downloadedFile: File;
+
+  let headers: Record<string, string> | undefined;
+  if (remoteUrl.includes('googleapis.com') || googleDriveId) {
+    try {
+      const { getValidAccessToken } = await import('@/services/googleDriveService');
+      const token = await getValidAccessToken();
+      headers = { Authorization: `Bearer ${token}` };
+    } catch (e) {
+      console.warn('Could not attach Google Drive auth header:', e);
+    }
+  }
 
   try {
     downloadedFile = await File.downloadFileAsync(remoteUrl, destinationFile, {
       idempotent: true,
+      headers,
       onProgress: (progress: DownloadProgress) => {
         if (onProgress) {
           const percent = progress.totalBytes > 0
@@ -121,8 +185,7 @@ export async function downloadVideoToLocal(
       },
     });
   } catch (error) {
-    console.error('Error during video download:', error);
-    // Cleanup if partial file exists
+    console.error('Error during media download:', error);
     try {
       if (destinationFile.exists) {
         destinationFile.delete();
@@ -131,8 +194,8 @@ export async function downloadVideoToLocal(
     throw error;
   }
 
-  const newItem: LocalVideoItem = {
-    id: googleDriveId || `vid_${Date.now()}`,
+  const newItem: LocalMediaItem = {
+    id: googleDriveId || `media_${Date.now()}`,
     title,
     localUri: downloadedFile.uri,
     sizeBytes: downloadedFile.size ?? 0,
@@ -140,22 +203,32 @@ export async function downloadVideoToLocal(
     remoteUrl,
     googleDriveId,
     thumbnailUrl,
+    mediaKind,
   };
 
   // Save to index
-  const currentList = await getLocalVideos();
+  const currentList = await getLocalMedia();
   const updatedList = [newItem, ...currentList.filter((v) => v.id !== newItem.id)];
   await AsyncStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify(updatedList));
 
   return newItem;
 }
 
+export const downloadVideoToLocal = (
+  remoteUrl: string,
+  title: string,
+  googleDriveId?: string,
+  thumbnailUrl?: string,
+  onProgress?: (progressPercent: number, bytesWritten: number, totalBytes: number) => void
+) => downloadMediaToLocal(remoteUrl, title, 'video', googleDriveId, thumbnailUrl, onProgress);
+
 /**
- * Deletes a video file from local storage and removes it from the index.
+ * Deletes a file ONLY from local mobile phone device storage.
+ * GUARANTEE: Never touches or deletes anything from Google Drive!
  */
-export async function deleteLocalVideo(localUriOrId: string): Promise<boolean> {
+export async function deleteLocalMedia(localUriOrId: string): Promise<boolean> {
   try {
-    const list = await getLocalVideos();
+    const list = await getLocalMedia();
     const target = list.find((v) => v.id === localUriOrId || v.localUri === localUriOrId);
 
     if (target) {
@@ -165,51 +238,46 @@ export async function deleteLocalVideo(localUriOrId: string): Promise<boolean> {
           file.delete();
         }
       } catch (err) {
-        console.warn('Could not delete physical file:', err);
+        console.warn('Physical file delete warning:', err);
       }
-      const updatedList = list.filter((v) => v.id !== target.id && v.localUri !== target.localUri);
-      await AsyncStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify(updatedList));
+
+      const updated = list.filter((v) => v.id !== target.id);
+      await AsyncStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify(updated));
       return true;
-    } else {
-      // Direct file path attempt
+    }
+    return false;
+  } catch (error) {
+    console.error('Error deleting local file:', error);
+    return false;
+  }
+}
+
+export const deleteLocalVideo = deleteLocalMedia;
+
+/**
+ * Calculates total storage used by all downloaded files on device.
+ */
+export async function getTotalLocalStorageUsed(): Promise<number> {
+  const items = await getLocalMedia();
+  return items.reduce((acc, curr) => acc + (curr.sizeBytes || 0), 0);
+}
+
+/**
+ * Clears all locally cached media from device storage.
+ */
+export async function clearAllLocalMedia(): Promise<void> {
+  try {
+    const items = await getLocalMedia();
+    for (const item of items) {
       try {
-        const file = new File(localUriOrId);
+        const file = new File(item.localUri);
         if (file.exists) {
           file.delete();
-          return true;
         }
       } catch {}
     }
-    return false;
-  } catch (error) {
-    console.error('Error deleting local video:', error);
-    return false;
-  }
-}
-
-/**
- * Clears all downloaded videos from local storage.
- */
-export async function clearAllLocalVideos(): Promise<void> {
-  try {
-    const dir = getVideosDirectory();
-    if (dir.exists) {
-      dir.delete();
-    }
     await AsyncStorage.removeItem(STORAGE_INDEX_KEY);
   } catch (error) {
-    console.error('Error clearing local videos:', error);
+    console.error('Error clearing local media storage:', error);
   }
-}
-
-/**
- * Calculates total storage used by all downloaded videos.
- */
-export async function getTotalStorageUsed(): Promise<{ totalBytes: number; formatted: string }> {
-  const list = await getLocalVideos();
-  const totalBytes = list.reduce((sum, item) => sum + (item.sizeBytes || 0), 0);
-  return {
-    totalBytes,
-    formatted: formatBytes(totalBytes),
-  };
 }

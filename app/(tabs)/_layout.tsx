@@ -5,9 +5,14 @@ import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
 export default function TabLayout() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme];
+  const insets = useSafeAreaInsets();
+
+  const bottomInset = insets.bottom > 0 ? insets.bottom : 8;
 
   return (
     <Tabs
@@ -17,8 +22,8 @@ export default function TabLayout() {
         tabBarStyle: {
           backgroundColor: theme.cardBackground,
           borderTopColor: theme.cardBorder,
-          height: 60,
-          paddingBottom: 8,
+          height: 60 + bottomInset,
+          paddingBottom: bottomInset,
           paddingTop: 6,
         },
         headerStyle: {

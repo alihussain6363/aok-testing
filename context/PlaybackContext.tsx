@@ -2,13 +2,19 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
+  type LocalMediaItem,
   type LocalVideoItem,
   getLocalVideos,
-  downloadVideoToLocal,
-  deleteLocalVideo,
-  findLocalVideo,
+  getLocalAudio,
+  getLocalImages,
+  getLocalMedia,
+  downloadMediaToLocal,
+  deleteLocalMedia,
+  findLocalMedia,
 } from '@/services/downloadManager';
-import { type DriveVideoItem } from '@/services/googleDriveService';
+import { type DriveItem } from '@/services/googleDriveService';
+import { ImageViewerModal } from '@/components/ImageViewerModal';
+import { MusicPlayerModal } from '@/components/MusicPlayerModal';
 
 export type DeletePreference = 'ask' | 'always_delete' | 'always_keep';
 
@@ -21,20 +27,23 @@ interface DownloadState {
 }
 
 interface PlaybackContextType {
-  currentVideo: LocalVideoItem | null;
-  previousVideo: LocalVideoItem | null;
-  pendingVideo: (LocalVideoItem | DriveVideoItem) | null;
+  currentVideo: LocalMediaItem | null;
+  previousVideo: LocalMediaItem | null;
+  pendingVideo: (LocalMediaItem | DriveItem) | null;
   showDeleteModal: boolean;
   downloadState: DownloadState;
   deletePreference: DeletePreference;
   setDeletePreference: (pref: DeletePreference) => Promise<void>;
-  requestPlayVideo: (video: LocalVideoItem | DriveVideoItem) => Promise<void>;
+  requestPlayVideo: (video: LocalMediaItem | DriveItem) => Promise<void>;
   confirmDeletePreviousAndPlayNext: () => Promise<void>;
   confirmKeepPreviousAndPlayNext: () => Promise<void>;
   cancelNextVideo: () => void;
   deleteCurrentVideoNow: () => Promise<void>;
-  refreshLocalVideos: () => Promise<LocalVideoItem[]>;
-  localVideos: LocalVideoItem[];
+  refreshLocalVideos: () => Promise<LocalMediaItem[]>;
+  localVideos: LocalMediaItem[];
+  // Music & Image player methods
+  requestPlayAudio: (item: DriveItem, playlist?: DriveItem[]) => void;
+  requestViewImages: (images: DriveItem[], initialIndex?: number) => void;
 }
 
 const PlaybackContext = createContext<PlaybackContextType | undefined>(undefined);
@@ -43,12 +52,22 @@ const PREFERENCE_KEY = '@drive_player_delete_preference';
 
 export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const router = useRouter();
-  const [currentVideo, setCurrentVideo] = useState<LocalVideoItem | null>(null);
-  const [previousVideo, setPreviousVideo] = useState<LocalVideoItem | null>(null);
-  const [pendingVideo, setPendingVideo] = useState<(LocalVideoItem | DriveVideoItem) | null>(null);
+  const [currentVideo, setCurrentVideo] = useState<LocalMediaItem | null>(null);
+  const [previousVideo, setPreviousVideo] = useState<LocalMediaItem | null>(null);
+  const [pendingVideo, setPendingVideo] = useState<(LocalMediaItem | DriveItem) | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState<boolean>(false);
   const [deletePreference, setDeletePreferenceState] = useState<DeletePreference>('ask');
-  const [localVideos, setLocalVideos] = useState<LocalVideoItem[]>([]);
+  const [localVideos, setLocalVideos] = useState<LocalMediaItem[]>([]);
+
+  // Music Player State
+  const [musicModalVisible, setMusicModalVisible] = useState(false);
+  const [musicPlaylist, setMusicPlaylist] = useState<DriveItem[]>([]);
+  const [musicIndex, setMusicIndex] = useState(0);
+
+  // Image Viewer State
+  const [imageModalVisible, setImageModalVisible] = useState(false);
+  const [imageGallery, setImageGallery] = useState<DriveItem[]>([]);
+  const [imageIndex, setImageIndex] = useState(0);
 
   const [downloadState, setDownloadState] = useState<DownloadState>({
     isDownloading: false,
@@ -71,7 +90,7 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     })();
   }, []);
 
-  const refreshLocalVideos = async (): Promise<LocalVideoItem[]> => {
+  const refreshLocalVideos = async (): Promise<LocalMediaItem[]> => {
     const list = await getLocalVideos();
     setLocalVideos(list);
     return list;
@@ -83,48 +102,67 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   /**
-   * Helper to ensure the target video is in local storage (downloads it if needed)
-   * and starts playback.
+   * Starts playback instantly via high-quality stream while downloading
+   * in the background for permanent offline smoothness.
    */
-  const processAndPlayVideo = async (targetVideo: LocalVideoItem | DriveVideoItem) => {
-    let playableItem: LocalVideoItem;
+  const processAndPlayVideo = async (targetVideo: LocalMediaItem | DriveItem) => {
+    let playableItem: LocalMediaItem;
 
     if ('localUri' in targetVideo) {
       playableItem = targetVideo;
     } else {
       // Check if it was previously downloaded
-      const existing = await findLocalVideo(targetVideo.id);
+      const existing = await findLocalMedia(targetVideo.id);
       if (existing) {
         playableItem = existing;
       } else {
-        // Download from Google Drive / remote URL to local storage
-        setDownloadState({
-          isDownloading: true,
-          progressPercent: 0,
-          bytesWritten: 0,
-          totalBytes: targetVideo.sizeBytes || 0,
+        // Instant streaming playable item: starts right away!
+        playableItem = {
+          id: targetVideo.id,
           title: targetVideo.name,
-        });
+          localUri: targetVideo.downloadUrl,
+          sizeBytes: targetVideo.sizeBytes || 0,
+          downloadedAt: Date.now(),
+          remoteUrl: targetVideo.downloadUrl,
+          googleDriveId: targetVideo.id,
+          thumbnailUrl: targetVideo.thumbnailUrl,
+          mediaKind: 'video',
+        };
 
-        try {
-          playableItem = await downloadVideoToLocal(
-            targetVideo.downloadUrl,
-            targetVideo.name,
-            targetVideo.id,
-            targetVideo.thumbnailUrl,
-            (percent, written, total) => {
-              setDownloadState({
-                isDownloading: true,
-                progressPercent: percent,
-                bytesWritten: written,
-                totalBytes: total,
-                title: targetVideo.name,
-              });
-            }
-          );
-        } finally {
-          setDownloadState((prev) => ({ ...prev, isDownloading: false }));
-        }
+        // Start background download for caching and smooth performance
+        (async () => {
+          setDownloadState({
+            isDownloading: true,
+            progressPercent: 0,
+            bytesWritten: 0,
+            totalBytes: targetVideo.sizeBytes || 0,
+            title: targetVideo.name,
+          });
+
+          try {
+            const downloaded = await downloadMediaToLocal(
+              targetVideo.downloadUrl,
+              targetVideo.name,
+              'video',
+              targetVideo.id,
+              targetVideo.thumbnailUrl,
+              (percent, written, total) => {
+                setDownloadState({
+                  isDownloading: true,
+                  progressPercent: percent,
+                  bytesWritten: written,
+                  totalBytes: total,
+                  title: targetVideo.name,
+                });
+              }
+            );
+            await refreshLocalVideos();
+          } catch (err) {
+            console.warn('Background video caching notice:', err);
+          } finally {
+            setDownloadState((prev) => ({ ...prev, isDownloading: false }));
+          }
+        })();
       }
     }
 
@@ -135,60 +173,44 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setCurrentVideo(playableItem);
     setPendingVideo(null);
     setShowDeleteModal(false);
-    await refreshLocalVideos();
 
     // Navigate to player tab
     router.push('/(tabs)/player');
   };
 
-  /**
-   * Main entry point when user taps ANY video from Google Drive or local list.
-   */
-  const requestPlayVideo = async (video: LocalVideoItem | DriveVideoItem) => {
-    // If we are already playing a video and it's different from the new one
-    if (currentVideo && currentVideo.id !== video.id) {
-      if (deletePreference === 'always_delete') {
-        // Auto delete previous video from local storage
-        await deleteLocalVideo(currentVideo.localUri);
-        await processAndPlayVideo(video);
-        return;
-      } else if (deletePreference === 'always_keep') {
-        // Keep previous video and play next
-        await processAndPlayVideo(video);
-        return;
-      } else {
-        // Show smart prompt asking if user wants to delete previous video
-        setPendingVideo(video);
+  const requestPlayVideo = async (targetVideo: LocalMediaItem | DriveItem) => {
+    // If a video is already playing and preference is 'ask', prompt user
+    if (currentVideo && currentVideo.id !== targetVideo.id) {
+      if (deletePreference === 'ask') {
+        setPendingVideo(targetVideo);
         setShowDeleteModal(true);
+        return;
+      } else if (deletePreference === 'always_delete') {
+        // Auto-delete previous from local phone storage only
+        await deleteLocalMedia(currentVideo.localUri);
+        await processAndPlayVideo(targetVideo);
         return;
       }
     }
 
-    // No current video or same video
-    await processAndPlayVideo(video);
+    await processAndPlayVideo(targetVideo);
   };
 
-  /**
-   * User chose "Delete Previous Video & Play Next" from the modal.
-   */
   const confirmDeletePreviousAndPlayNext = async () => {
     if (currentVideo) {
-      await deleteLocalVideo(currentVideo.localUri);
+      await deleteLocalMedia(currentVideo.localUri);
     }
     if (pendingVideo) {
       const next = pendingVideo;
-      setShowDeleteModal(false);
+      setPendingVideo(null);
       await processAndPlayVideo(next);
     }
   };
 
-  /**
-   * User chose "Keep Previous Video & Play Next" from the modal.
-   */
   const confirmKeepPreviousAndPlayNext = async () => {
     if (pendingVideo) {
       const next = pendingVideo;
-      setShowDeleteModal(false);
+      setPendingVideo(null);
       await processAndPlayVideo(next);
     }
   };
@@ -200,10 +222,26 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const deleteCurrentVideoNow = async () => {
     if (currentVideo) {
-      await deleteLocalVideo(currentVideo.localUri);
+      await deleteLocalMedia(currentVideo.localUri);
       setCurrentVideo(null);
       await refreshLocalVideos();
     }
+  };
+
+  // Music Player Launcher
+  const requestPlayAudio = (item: DriveItem, playlist?: DriveItem[]) => {
+    const list = playlist && playlist.length > 0 ? playlist : [item];
+    const initialIdx = list.findIndex((i) => i.id === item.id);
+    setMusicPlaylist(list);
+    setMusicIndex(initialIdx >= 0 ? initialIdx : 0);
+    setMusicModalVisible(true);
+  };
+
+  // Image Viewer Launcher
+  const requestViewImages = (images: DriveItem[], initialIndex = 0) => {
+    setImageGallery(images);
+    setImageIndex(initialIndex);
+    setImageModalVisible(true);
   };
 
   return (
@@ -223,8 +261,27 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         deleteCurrentVideoNow,
         refreshLocalVideos,
         localVideos,
+        requestPlayAudio,
+        requestViewImages,
       }}>
       {children}
+
+      {/* Global Image Viewer Modal */}
+      <ImageViewerModal
+        visible={imageModalVisible}
+        images={imageGallery}
+        initialIndex={imageIndex}
+        onClose={() => setImageModalVisible(false)}
+      />
+
+      {/* Global Music Player Modal */}
+      <MusicPlayerModal
+        visible={musicModalVisible}
+        playlist={musicPlaylist}
+        currentIndex={musicIndex}
+        onClose={() => setMusicModalVisible(false)}
+        onTrackChange={(idx) => setMusicIndex(idx)}
+      />
     </PlaybackContext.Provider>
   );
 };
