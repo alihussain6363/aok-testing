@@ -28,6 +28,7 @@ import {
   type MediaKind,
 } from '@/services/googleDriveService';
 import { formatBytes } from '@/services/downloadManager';
+import { getRecentVideos, type RecentVideoItem } from '@/services/watchHistoryManager';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
 
@@ -191,10 +192,21 @@ export default function DriveScreen() {
     }
   };
 
+  const [recentVideos, setRecentVideos] = useState<RecentVideoItem[]>([]);
+
+  useEffect(() => {
+    getRecentVideos(4).then(setRecentVideos);
+  }, [driveItems]);
+
   // Media item tap handler
   const handleItemPress = (item: DriveItem) => {
     if (item.isFolder) {
       handleOpenFolder(item);
+    } else if (item.kind === 'image') {
+      const idx = folderImages.findIndex((i) => i.id === item.id);
+      requestViewImages(folderImages, idx >= 0 ? idx : 0);
+    } else if (item.kind === 'audio') {
+      requestPlayAudio(item, folderAudio);
     } else {
       // Open Media Action Sheet for rich options: Stream / Stream & Download / Download
       setSelectedActionItem(item);
@@ -293,6 +305,54 @@ export default function DriveScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* Continue Watching (Last Played Videos) */}
+      {recentVideos.length > 0 && folderStack.length === 1 && (
+        <View style={styles.recentSection}>
+          <View style={styles.recentHeaderRow}>
+            <Ionicons name="time-outline" size={18} color={theme.primary} />
+            <Text style={[styles.recentSectionTitle, { color: theme.text }]}>Continue Watching</Text>
+          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
+            {recentVideos.map((rv) => (
+              <TouchableOpacity
+                key={rv.id}
+                style={[styles.recentHeroCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}
+                onPress={() => {
+                  requestPlayVideo(
+                    {
+                      id: rv.id,
+                      name: rv.title,
+                      isFolder: false,
+                      kind: 'video',
+                      downloadUrl: rv.localUri,
+                      thumbnailUrl: rv.thumbnailUrl,
+                      source: 'google_drive',
+                    },
+                    folderVideos,
+                    'stream'
+                  );
+                }}
+                activeOpacity={0.7}>
+                <View style={styles.recentPlayIcon}>
+                  <Ionicons name="play" size={16} color="#fff" />
+                </View>
+                <View style={{ flex: 1, minWidth: 130, maxWidth: 190 }}>
+                  <Text style={[styles.recentCardTitle, { color: theme.text }]} numberOfLines={1}>
+                    {rv.title}
+                  </Text>
+                  <Text style={[styles.recentCardSub, { color: theme.textSecondary }]}>
+                    {rv.progressPercent}% watched
+                  </Text>
+                  <View style={styles.recentBarBg}>
+                    <View style={[styles.recentBarFill, { width: `${rv.progressPercent}%` }]} />
+                  </View>
+                </View>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
 
       {/* Breadcrumb Navigation Bar */}
       <View
@@ -619,13 +679,19 @@ export default function DriveScreen() {
                 {/* Quick Action Buttons for Non-Folders */}
                 {!isFolder && (
                   <View style={styles.quickActionsRow}>
-                    {/* Stream Play Quick Button */}
+                    {/* Primary Action Quick Button */}
                     <TouchableOpacity
                       style={[styles.quickPillBtn, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}
                       onPress={() => executePlayMedia(item, 'stream')}
                       activeOpacity={0.7}>
-                      <Ionicons name="play" size={13} color={theme.primary} />
-                      <Text style={[styles.quickPillText, { color: theme.primary }]}>Stream</Text>
+                      <Ionicons
+                        name={item.kind === 'video' ? 'play' : item.kind === 'audio' ? 'musical-notes' : 'eye'}
+                        size={13}
+                        color={theme.primary}
+                      />
+                      <Text style={[styles.quickPillText, { color: theme.primary }]}>
+                        {item.kind === 'video' ? 'Stream' : item.kind === 'audio' ? 'Listen' : 'View'}
+                      </Text>
                     </TouchableOpacity>
 
                     {/* Download Quick Button */}
@@ -1362,5 +1428,54 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 15,
     fontWeight: '600',
+  },
+  recentSection: {
+    marginBottom: 16,
+  },
+  recentHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+  },
+  recentSectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  recentHeroCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  recentPlayIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#0284c7',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  recentCardTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  recentCardSub: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  recentBarBg: {
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    marginTop: 4,
+    overflow: 'hidden',
+  },
+  recentBarFill: {
+    height: '100%',
+    backgroundColor: '#38bdf8',
+    borderRadius: 1.5,
   },
 });
