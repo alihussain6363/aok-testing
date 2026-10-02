@@ -161,18 +161,24 @@ export async function downloadMediaToLocal(
   let downloadedFile: File;
 
   let headers: Record<string, string> | undefined;
+  let cleanUrl = remoteUrl;
   if (remoteUrl.includes('googleapis.com') || googleDriveId) {
     try {
-      const { getValidAccessToken } = await import('@/services/googleDriveService');
+      const { getValidAccessToken, buildDriveDownloadUrl } = await import('@/services/googleDriveService');
       const token = await getValidAccessToken();
       headers = { Authorization: `Bearer ${token}` };
+      if (googleDriveId) {
+        cleanUrl = buildDriveDownloadUrl(googleDriveId);
+      } else if (cleanUrl.includes('&access_token=')) {
+        cleanUrl = cleanUrl.replace(/[?&]access_token=[^&]+/, '');
+      }
     } catch (e) {
       console.warn('Could not attach Google Drive auth header:', e);
     }
   }
 
   try {
-    downloadedFile = await File.downloadFileAsync(remoteUrl, destinationFile, {
+    downloadedFile = await File.downloadFileAsync(cleanUrl, destinationFile, {
       idempotent: true,
       headers,
       onProgress: (progress: DownloadProgress) => {

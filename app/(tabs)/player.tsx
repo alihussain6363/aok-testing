@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -7,17 +7,21 @@ import {
   ScrollView,
   Alert,
   Dimensions,
+  Modal,
+  StatusBar,
 } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { usePlayback } from '@/context/PlaybackContext';
+import { usePlayback, type PlayableVideo } from '@/context/PlaybackContext';
 import { formatBytes } from '@/services/downloadManager';
 import { SAMPLE_VIDEOS } from '@/services/googleDriveService';
 import { MXPlayerGestureView } from '@/components/MXPlayerGestureView';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
+
+type VideoQuality = 'Original (HD)' | '1080p' | '720p' | '480p' | 'Auto';
 
 export default function PlayerScreen() {
   const router = useRouter();
@@ -31,6 +35,12 @@ export default function PlayerScreen() {
     deleteCurrentVideoNow,
     localVideos,
     downloadState,
+    activeFolderPlaylist,
+    activeFolderIndex,
+    playNextVideoInFolder,
+    playPrevVideoInFolder,
+    authToken,
+    getAuthToken,
   } = usePlayback();
 
   const [isPlaying, setIsPlaying] = useState(true);
@@ -42,25 +52,54 @@ export default function PlayerScreen() {
   const [contentFit, setContentFit] = useState<'contain' | 'cover'>('contain');
   const [isLocked, setIsLocked] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [selectedQuality, setSelectedQuality] = useState<VideoQuality>('Original (HD)');
+  const [showQualityModal, setShowQualityModal] = useState(false);
 
-  // Initialize expo-video player with current video URI
-  const player = useVideoPlayer(currentVideo ? currentVideo.localUri : null, (p) => {
+  // Helper to build source with Google Drive auth header
+  const buildVideoSource = (video: typeof currentVideo, token: string | null) => {
+    if (!video || !video.localUri) return null;
+    if (video.localUri.startsWith('file://')) {
+      return video.localUri;
+    }
+    const isGoogleApi = video.localUri.includes('googleapis.com');
+    if (isGoogleApi && token) {
+      return {
+        uri: video.localUri,
+        headers: { Authorization: `Bearer ${token}` },
+      };
+    }
+    return video.localUri;
+  };
+
+  // Initialize expo-video player
+  const player = useVideoPlayer(currentVideo ? (buildVideoSource(currentVideo, authToken) as any) : null, (p) => {
     p.loop = false;
     p.play();
   });
 
-  // Keep player source synchronized with currentVideo
+  // Keep player source synchronized with currentVideo & token
   useEffect(() => {
     if (player && currentVideo) {
-      player.replace(currentVideo.localUri);
-      player.play();
-      setIsPlaying(true);
+      (async () => {
+        let token = authToken;
+        if (!token && currentVideo.localUri.includes('googleapis.com')) {
+          token = await getAuthToken();
+        }
+        const src = buildVideoSource(currentVideo, token);
+        if (src) {
+          player.replace(src as any);
+          player.play();
+          setIsPlaying(true);
+        }
+      })();
     }
-  }, [currentVideo?.localUri]);
+  }, [currentVideo?.localUri, authToken]);
 
   // Listen for playback state and time updates
   useEffect(() => {
     if (!player) return;
+
     const subPlaying = player.addListener('playingChange', (event) => {
       setIsPlaying(event.isPlaying);
     });
@@ -72,11 +111,21 @@ export default function PlayerScreen() {
       }
     });
 
+    const subStatus = player.addListener('statusChange', (event) => {
+      // Auto-advance to next video in folder when finished
+      if (event.status === 'idle' && duration > 0 && currentTime >= duration - 1) {
+        if (activeFolderPlaylist.length > 1) {
+          playNextVideoInFolder();
+        }
+      }
+    });
+
     return () => {
       subPlaying.remove();
       subTime.remove();
+      subStatus.remove();
     };
-  }, [player]);
+  }, [player, duration, currentTime, activeFolderPlaylist.length]);
 
   const togglePlayPause = () => {
     if (!player || isLocked) return;
@@ -129,6 +178,10 @@ export default function PlayerScreen() {
     setIsMuted(player.muted);
   };
 
+  const toggleFullscreen = () => {
+    setIsFullscreen((prev) => !prev);
+  };
+
   const handleDeleteThisVideo = () => {
     Alert.alert(
       'Delete from Local Storage',
@@ -156,7 +209,7 @@ export default function PlayerScreen() {
         <View style={[styles.emptyIconBadge, { backgroundColor: theme.primaryLight }]}>
           <Ionicons name="videocam-outline" size={48} color={theme.primary} />
         </View>
-        <Text style={[styles.emptyTitle, { color: theme.text }]}>No Video Playing</Text>
+        <Text style={[styles.emptyTitle, { color: theme.text }]}>No Video Selected</Text>
         <Text style={[styles.emptySubtitle, { color: theme.textSecondary }]}>
           Select a video from your Google Drive folders or test with a sample video to start playing.
         </Text>
@@ -165,7 +218,7 @@ export default function PlayerScreen() {
           onPress={() => router.push('/(tabs)')}
           activeOpacity={0.8}>
           <Ionicons name="cloud-outline" size={20} color="#fff" />
-          <Text style={styles.emptyButtonText}>Browse Google Drive</Text>
+          <Text style={styles.emptyButtonText}>Browse Google Drive Folders</Text>
         </TouchableOpacity>
       </View>
     );
@@ -175,12 +228,18 @@ export default function PlayerScreen() {
     (l) => l.id === currentVideo.id || l.localUri === currentVideo.localUri
   );
 
+  const playlistToDisplay = activeFolderPlaylist.length > 0 ? activeFolderPlaylist : (SAMPLE_VIDEOS as PlayableVideo[]);
+
   return (
-    <ScrollView
-      style={[styles.container, { backgroundColor: theme.background }]}
-      contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
-      {/* Video Viewport Container with MX Gesture Control */}
-      <View style={[styles.videoContainer, { backgroundColor: '#000' }]}>
+    <View style={[styles.screenWrapper, { backgroundColor: theme.background }]}>
+      <StatusBar hidden={isFullscreen} />
+
+      {/* Main Viewport Container */}
+      <View
+        style={[
+          isFullscreen ? styles.fullscreenVideoContainer : styles.standardVideoContainer,
+          { backgroundColor: '#000' },
+        ]}>
         <MXPlayerGestureView
           durationSeconds={duration}
           currentPositionSeconds={currentTime}
@@ -198,202 +257,304 @@ export default function PlayerScreen() {
             startsPictureInPictureAutomatically
           />
 
-          {/* Top Quick Actions Overlay (Aspect Ratio & Lock) */}
-          <View style={styles.videoTopOverlay}>
-            <TouchableOpacity
-              onPress={toggleContentFit}
-              style={styles.overlayIconBtn}
-              activeOpacity={0.8}>
-              <Ionicons
-                name={contentFit === 'contain' ? 'scan-outline' : 'contract-outline'}
-                size={18}
-                color="#fff"
-              />
-              <Text style={styles.overlayBtnText}>
-                {contentFit === 'contain' ? 'Fit' : 'Fill'}
-              </Text>
-            </TouchableOpacity>
+          {/* Top Quick Action Overlays */}
+          {showControls && (
+            <View style={[styles.videoTopOverlay, isFullscreen && { paddingTop: insets.top + 10 }]}>
+              {/* Fullscreen Toggle */}
+              <TouchableOpacity
+                onPress={toggleFullscreen}
+                style={[styles.overlayIconBtn, isFullscreen && styles.overlayIconBtnActive]}
+                activeOpacity={0.8}>
+                <Ionicons
+                  name={isFullscreen ? 'contract-outline' : 'expand-outline'}
+                  size={18}
+                  color={isFullscreen ? '#38bdf8' : '#fff'}
+                />
+                <Text style={[styles.overlayBtnText, isFullscreen && { color: '#38bdf8' }]}>
+                  {isFullscreen ? 'Exit Full' : 'Fullscreen'}
+                </Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              onPress={() => setIsLocked(!isLocked)}
-              style={[styles.overlayIconBtn, isLocked && styles.overlayIconBtnActive]}
-              activeOpacity={0.8}>
-              <Ionicons
-                name={isLocked ? 'lock-closed' : 'lock-open-outline'}
-                size={18}
-                color={isLocked ? '#f59e0b' : '#fff'}
-              />
-              <Text style={[styles.overlayBtnText, isLocked && { color: '#f59e0b' }]}>
-                {isLocked ? 'Locked' : 'Lock'}
-              </Text>
-            </TouchableOpacity>
-          </View>
+              {/* Quality Switcher Badge */}
+              <TouchableOpacity
+                onPress={() => setShowQualityModal(true)}
+                style={styles.overlayIconBtn}
+                activeOpacity={0.8}>
+                <Ionicons name="sparkles" size={16} color="#38bdf8" />
+                <Text style={[styles.overlayBtnText, { color: '#38bdf8', fontWeight: '700' }]}>
+                  {selectedQuality.replace(' (HD)', '')}
+                </Text>
+              </TouchableOpacity>
+
+              {/* Aspect Ratio Fit */}
+              <TouchableOpacity
+                onPress={toggleContentFit}
+                style={styles.overlayIconBtn}
+                activeOpacity={0.8}>
+                <Ionicons
+                  name={contentFit === 'contain' ? 'scan-outline' : 'contract-outline'}
+                  size={18}
+                  color="#fff"
+                />
+                <Text style={styles.overlayBtnText}>
+                  {contentFit === 'contain' ? 'Fit' : 'Fill'}
+                </Text>
+              </TouchableOpacity>
+
+              {/* Lock Controls */}
+              <TouchableOpacity
+                onPress={() => setIsLocked(!isLocked)}
+                style={[styles.overlayIconBtn, isLocked && styles.overlayIconBtnActive]}
+                activeOpacity={0.8}>
+                <Ionicons
+                  name={isLocked ? 'lock-closed' : 'lock-open-outline'}
+                  size={18}
+                  color={isLocked ? '#f59e0b' : '#fff'}
+                />
+                <Text style={[styles.overlayBtnText, isLocked && { color: '#f59e0b' }]}>
+                  {isLocked ? 'Locked' : 'Lock'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </MXPlayerGestureView>
       </View>
 
-      {/* Background Caching Indicator */}
-      {downloadState.isDownloading && (
-        <View style={[styles.cachingBanner, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
-          <Ionicons name="cloud-download" size={18} color={theme.primary} />
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.cachingTitle, { color: theme.text }]}>
-              Caching for offline smoothness ({downloadState.progressPercent}%)
-            </Text>
-            <View style={styles.cachingBarBg}>
-              <View style={[styles.cachingBarFill, { width: `${downloadState.progressPercent}%` }]} />
+      {/* When in Fullscreen mode, don't show the scrollable details below */}
+      {!isFullscreen && (
+        <ScrollView
+          style={styles.scrollDetails}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}>
+          {/* Background Caching Indicator */}
+          {downloadState.isDownloading && (
+            <View style={[styles.cachingBanner, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
+              <Ionicons name="cloud-download" size={18} color={theme.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.cachingTitle, { color: theme.text }]}>
+                  Caching for offline smoothness ({downloadState.progressPercent}%)
+                </Text>
+                <View style={styles.cachingBarBg}>
+                  <View style={[styles.cachingBarFill, { width: `${downloadState.progressPercent}%` }]} />
+                </View>
+              </View>
+            </View>
+          )}
+
+          {/* Main Controls Card */}
+          <View style={[styles.controlsCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
+            <View style={styles.controlsRow}>
+              {/* Previous Video in Folder */}
+              <TouchableOpacity
+                onPress={playPrevVideoInFolder}
+                style={[styles.controlIconBtn, activeFolderPlaylist.length <= 1 && styles.controlBtnDisabled]}
+                disabled={activeFolderPlaylist.length <= 1}>
+                <Ionicons name="play-skip-back" size={22} color={activeFolderPlaylist.length <= 1 ? '#666' : theme.text} />
+              </TouchableOpacity>
+
+              {/* Skip -10s */}
+              <TouchableOpacity onPress={() => seekRelative(-10)} style={styles.controlIconBtn}>
+                <Ionicons name="refresh-outline" size={22} color={theme.text} style={{ transform: [{ scaleX: -1 }] }} />
+              </TouchableOpacity>
+
+              {/* Main Play / Pause */}
+              <TouchableOpacity
+                onPress={togglePlayPause}
+                style={[styles.mainPlayBtn, { backgroundColor: theme.primary }]}
+                activeOpacity={0.8}>
+                <Ionicons name={isPlaying ? 'pause' : 'play'} size={28} color="#fff" />
+              </TouchableOpacity>
+
+              {/* Skip +10s */}
+              <TouchableOpacity onPress={() => seekRelative(10)} style={styles.controlIconBtn}>
+                <Ionicons name="refresh-outline" size={22} color={theme.text} />
+              </TouchableOpacity>
+
+              {/* Next Video in Folder */}
+              <TouchableOpacity
+                onPress={playNextVideoInFolder}
+                style={[styles.controlIconBtn, activeFolderPlaylist.length <= 1 && styles.controlBtnDisabled]}
+                disabled={activeFolderPlaylist.length <= 1}>
+                <Ionicons name="play-skip-forward" size={22} color={activeFolderPlaylist.length <= 1 ? '#666' : theme.text} />
+              </TouchableOpacity>
+
+              {/* Speed Toggle */}
+              <TouchableOpacity onPress={handleCycleSpeed} style={styles.speedBtn}>
+                <Text style={[styles.speedText, { color: theme.primary }]}>{playbackSpeed}x</Text>
+              </TouchableOpacity>
+
+              {/* Mute */}
+              <TouchableOpacity onPress={toggleMute} style={styles.controlIconBtn}>
+                <Ionicons
+                  name={isMuted ? 'volume-mute' : 'volume-high'}
+                  size={22}
+                  color={isMuted ? theme.danger : theme.text}
+                />
+              </TouchableOpacity>
             </View>
           </View>
-        </View>
+
+          {/* Video Information & Local Storage Status */}
+          <View style={[styles.detailsCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
+            <View style={styles.detailsHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.videoTitle, { color: theme.text }]} numberOfLines={2}>
+                  {currentVideo.title}
+                </Text>
+                <View style={styles.metaRow}>
+                  <View style={[styles.statusBadge, { backgroundColor: isLocalOnDisk ? theme.successLight : theme.primaryLight }]}>
+                    <Ionicons name={isLocalOnDisk ? 'checkmark-circle' : 'cloud-outline'} size={14} color={isLocalOnDisk ? theme.success : theme.primary} />
+                    <Text style={[styles.statusBadgeText, { color: isLocalOnDisk ? theme.success : theme.primary }]}>
+                      {isLocalOnDisk ? 'Saved in Device Storage' : 'Streaming from Drive'}
+                    </Text>
+                  </View>
+                  {currentVideo.sizeBytes ? (
+                    <Text style={[styles.sizeText, { color: theme.textSecondary }]}>
+                      {formatBytes(currentVideo.sizeBytes)}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+
+              {/* Delete from phone button */}
+              {isLocalOnDisk && (
+                <TouchableOpacity
+                  style={[styles.deleteButton, { backgroundColor: theme.dangerLight, borderColor: theme.danger }]}
+                  onPress={handleDeleteThisVideo}
+                  activeOpacity={0.7}>
+                  <Ionicons name="trash-outline" size={16} color={theme.danger} />
+                  <Text style={[styles.deleteButtonText, { color: theme.danger }]}>Delete Local</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          {/* In-Folder Video Queue Section */}
+          <View style={styles.switchSection}>
+            <View style={styles.switchSectionHeader}>
+              <Ionicons name="albums-outline" size={20} color={theme.primary} />
+              <Text style={[styles.switchSectionTitle, { color: theme.text }]}>
+                {activeFolderPlaylist.length > 0
+                  ? `Folder Playlist (${activeFolderIndex + 1} of ${activeFolderPlaylist.length})`
+                  : 'Sample Queue'}
+              </Text>
+            </View>
+
+            {playlistToDisplay.map((item, idx) => {
+              const itemId = 'id' in item ? item.id : '';
+              const itemName = 'name' in item ? item.name : (item as any).title;
+              const itemSize = item.sizeBytes ? formatBytes(item.sizeBytes) : undefined;
+              const isCurrent = currentVideo.id === itemId;
+
+              return (
+                <TouchableOpacity
+                  key={itemId || `item_${idx}`}
+                  style={[
+                    styles.nextItemCard,
+                    {
+                      backgroundColor: isCurrent ? theme.primaryLight : theme.cardBackground,
+                      borderColor: isCurrent ? theme.primary : theme.cardBorder,
+                    },
+                  ]}
+                  onPress={() => requestPlayVideo(item, activeFolderPlaylist, 'stream')}
+                  activeOpacity={0.7}>
+                  <Ionicons
+                    name={isCurrent ? 'radio-button-on' : 'play-circle-outline'}
+                    size={22}
+                    color={isCurrent ? theme.primary : theme.textSecondary}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={[
+                        styles.nextItemTitle,
+                        { color: isCurrent ? theme.primary : theme.text, fontWeight: isCurrent ? '700' : '500' },
+                      ]}
+                      numberOfLines={1}>
+                      {itemName}
+                    </Text>
+                    <Text style={[styles.nextItemSub, { color: theme.textSecondary }]}>
+                      {isCurrent ? '▶ Now Playing' : itemSize ? `Size: ${itemSize}` : 'Google Drive Video'}
+                    </Text>
+                  </View>
+                  {isCurrent && (
+                    <View style={styles.nowPlayingBadge}>
+                      <Text style={styles.nowPlayingText}>Active</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </ScrollView>
       )}
 
-      {/* Main Playback Bar Controls */}
-      <View style={[styles.controlsCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
-        <View style={styles.controlsRow}>
-          {/* Replay */}
-          <TouchableOpacity onPress={handleReplay} style={styles.controlIconBtn}>
-            <Ionicons name="refresh" size={22} color={theme.text} />
-          </TouchableOpacity>
-
-          {/* Skip -10s */}
-          <TouchableOpacity onPress={() => seekRelative(-10)} style={styles.controlIconBtn}>
-            <Ionicons name="play-back" size={24} color={theme.text} />
-          </TouchableOpacity>
-
-          {/* Main Play / Pause */}
-          <TouchableOpacity
-            onPress={togglePlayPause}
-            style={[styles.mainPlayBtn, { backgroundColor: theme.primary }]}
-            activeOpacity={0.8}>
-            <Ionicons name={isPlaying ? 'pause' : 'play'} size={28} color="#fff" />
-          </TouchableOpacity>
-
-          {/* Skip +10s */}
-          <TouchableOpacity onPress={() => seekRelative(10)} style={styles.controlIconBtn}>
-            <Ionicons name="play-forward" size={24} color={theme.text} />
-          </TouchableOpacity>
-
-          {/* Speed Toggle */}
-          <TouchableOpacity onPress={handleCycleSpeed} style={styles.speedBtn}>
-            <Text style={[styles.speedText, { color: theme.primary }]}>{playbackSpeed}x</Text>
-          </TouchableOpacity>
-
-          {/* Mute */}
-          <TouchableOpacity onPress={toggleMute} style={styles.controlIconBtn}>
-            <Ionicons
-              name={isMuted ? 'volume-mute' : 'volume-high'}
-              size={22}
-              color={isMuted ? theme.danger : theme.text}
-            />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Gesture Controls Guide Box */}
-      <View style={[styles.gestureGuideCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
-        <View style={styles.guideHeaderRow}>
-          <Ionicons name="finger-print" size={18} color={theme.primary} />
-          <Text style={[styles.guideTitle, { color: theme.text }]}>MX Player Touch Gestures Active</Text>
-        </View>
-        <Text style={[styles.guideText, { color: theme.textSecondary }]}>
-          • <Text style={{ fontWeight: '600', color: theme.text }}>Right vertical swipe:</Text> Adjust volume up/down
-          {'\n'}• <Text style={{ fontWeight: '600', color: theme.text }}>Horizontal swipe:</Text> Fast scrub seek forward/backward
-          {'\n'}• <Text style={{ fontWeight: '600', color: theme.text }}>Double-tap left/right:</Text> Skip ±10 seconds
-        </Text>
-      </View>
-
-      {/* Video Information & Local Storage Status */}
-      <View style={[styles.detailsCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
-        <View style={styles.detailsHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.videoTitle, { color: theme.text }]} numberOfLines={2}>
-              {currentVideo.title}
-            </Text>
-            <View style={styles.metaRow}>
-              <View style={[styles.statusBadge, { backgroundColor: isLocalOnDisk ? theme.successLight : theme.primaryLight }]}>
-                <Ionicons name={isLocalOnDisk ? 'checkmark-circle' : 'cloud-outline'} size={14} color={isLocalOnDisk ? theme.success : theme.primary} />
-                <Text style={[styles.statusBadgeText, { color: isLocalOnDisk ? theme.success : theme.primary }]}>
-                  {isLocalOnDisk ? 'Saved in Device Storage' : 'Streaming from Drive'}
-                </Text>
-              </View>
-              {currentVideo.sizeBytes ? (
-                <Text style={[styles.sizeText, { color: theme.textSecondary }]}>
-                  {formatBytes(currentVideo.sizeBytes)}
-                </Text>
-              ) : null}
+      {/* Quality Switcher Modal */}
+      <Modal visible={showQualityModal} transparent animationType="fade" onRequestClose={() => setShowQualityModal(false)}>
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setShowQualityModal(false)}>
+          <View style={[styles.qualitySheet, { backgroundColor: theme.cardBackground }]}>
+            <View style={styles.qualityHeader}>
+              <Ionicons name="sparkles" size={22} color={theme.primary} />
+              <Text style={[styles.qualitySheetTitle, { color: theme.text }]}>Select Video Quality</Text>
             </View>
-          </View>
-
-          {/* Delete from phone button */}
-          {isLocalOnDisk && (
-            <TouchableOpacity
-              style={[styles.deleteButton, { backgroundColor: theme.dangerLight, borderColor: theme.danger }]}
-              onPress={handleDeleteThisVideo}
-              activeOpacity={0.7}>
-              <Ionicons name="trash-outline" size={16} color={theme.danger} />
-              <Text style={[styles.deleteButtonText, { color: theme.danger }]}>Delete Local</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      </View>
-
-      {/* Sample Videos to Switch Between */}
-      <View style={styles.switchSection}>
-        <View style={styles.switchSectionHeader}>
-          <Ionicons name="play-skip-forward-circle-outline" size={20} color={theme.primary} />
-          <Text style={[styles.switchSectionTitle, { color: theme.text }]}>
-            Switch / Queue Video
-          </Text>
-        </View>
-
-        {SAMPLE_VIDEOS.map((item) => {
-          const isCurrent = currentVideo.id === item.id;
-          return (
-            <TouchableOpacity
-              key={item.id}
-              style={[
-                styles.nextItemCard,
-                {
-                  backgroundColor: isCurrent ? theme.primaryLight : theme.cardBackground,
-                  borderColor: isCurrent ? theme.primary : theme.cardBorder,
-                },
-              ]}
-              onPress={() => requestPlayVideo(item)}
-              activeOpacity={0.7}>
-              <Ionicons
-                name={isCurrent ? 'radio-button-on' : 'play-circle-outline'}
-                size={22}
-                color={isCurrent ? theme.primary : theme.textSecondary}
-              />
-              <View style={{ flex: 1 }}>
-                <Text
+            {(['Original (HD)', '1080p', '720p', '480p', 'Auto'] as VideoQuality[]).map((q) => {
+              const isSelected = selectedQuality === q;
+              return (
+                <TouchableOpacity
+                  key={q}
                   style={[
-                    styles.nextItemTitle,
-                    { color: isCurrent ? theme.primary : theme.text, fontWeight: isCurrent ? '700' : '500' },
+                    styles.qualityOption,
+                    isSelected && { backgroundColor: theme.primaryLight, borderColor: theme.primary },
                   ]}
-                  numberOfLines={1}>
-                  {item.name}
-                </Text>
-                <Text style={[styles.nextItemSub, { color: theme.textSecondary }]}>
-                  {item.description}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-    </ScrollView>
+                  onPress={() => {
+                    setSelectedQuality(q);
+                    setShowQualityModal(false);
+                  }}>
+                  <Ionicons
+                    name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                    size={20}
+                    color={isSelected ? theme.primary : theme.textSecondary}
+                  />
+                  <Text
+                    style={[
+                      styles.qualityOptionText,
+                      { color: isSelected ? theme.primary : theme.text, fontWeight: isSelected ? '700' : '500' },
+                    ]}>
+                    {q}
+                  </Text>
+                  {q === 'Original (HD)' && (
+                    <View style={[styles.qualityTag, { backgroundColor: '#38bdf8' }]}>
+                      <Text style={styles.qualityTagText}>Best</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screenWrapper: {
     flex: 1,
   },
-  videoContainer: {
+  standardVideoContainer: {
     width: '100%',
     height: Dimensions.get('window').width * (9 / 16),
     maxHeight: 280,
     position: 'relative',
+  },
+  fullscreenVideoContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 9999,
   },
   videoPlayer: {
     width: '100%',
@@ -401,8 +562,8 @@ const styles = StyleSheet.create({
   },
   videoTopOverlay: {
     position: 'absolute',
-    top: 10,
-    right: 12,
+    top: 8,
+    right: 8,
     flexDirection: 'row',
     gap: 8,
     zIndex: 10,
@@ -412,27 +573,30 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     backgroundColor: 'rgba(0, 0, 0, 0.65)',
-    paddingHorizontal: 8,
     paddingVertical: 5,
-    borderRadius: 8,
+    paddingHorizontal: 8,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.2)',
   },
   overlayIconBtnActive: {
-    backgroundColor: 'rgba(245, 158, 11, 0.25)',
-    borderColor: '#f59e0b',
+    borderColor: '#38bdf8',
+    backgroundColor: 'rgba(56, 189, 248, 0.2)',
   },
   overlayBtnText: {
     color: '#fff',
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '600',
+  },
+  scrollDetails: {
+    flex: 1,
   },
   cachingBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    margin: 16,
-    marginBottom: 0,
+    gap: 12,
+    marginHorizontal: 16,
+    marginTop: 12,
     padding: 12,
     borderRadius: 12,
     borderWidth: 1,
@@ -440,36 +604,38 @@ const styles = StyleSheet.create({
   cachingTitle: {
     fontSize: 12,
     fontWeight: '600',
-    marginBottom: 6,
+    marginBottom: 4,
   },
   cachingBarBg: {
     height: 4,
-    backgroundColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     overflow: 'hidden',
   },
   cachingBarFill: {
     height: '100%',
-    backgroundColor: '#0284c7',
+    backgroundColor: '#38bdf8',
+    borderRadius: 2,
   },
   controlsCard: {
-    margin: 16,
-    borderRadius: 18,
-    padding: 14,
+    marginHorizontal: 16,
+    marginTop: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 16,
     borderWidth: 1,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
   },
   controlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-around',
+    justifyContent: 'space-between',
   },
   controlIconBtn: {
     padding: 8,
+    borderRadius: 8,
+  },
+  controlBtnDisabled: {
+    opacity: 0.3,
   },
   mainPlayBtn: {
     width: 52,
@@ -477,46 +643,24 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#0284c7',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
+    shadowColor: '#38bdf8',
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
     elevation: 4,
   },
   speedBtn: {
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: 'rgba(2, 132, 199, 0.1)',
+    borderRadius: 6,
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
   },
   speedText: {
     fontSize: 13,
     fontWeight: '700',
   },
-  gestureGuideCard: {
-    marginHorizontal: 16,
-    marginBottom: 16,
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-  },
-  guideHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
-  },
-  guideTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  guideText: {
-    fontSize: 12,
-    lineHeight: 18,
-  },
   detailsCard: {
     marginHorizontal: 16,
-    marginBottom: 16,
+    marginTop: 12,
     padding: 16,
     borderRadius: 16,
     borderWidth: 1,
@@ -524,25 +668,27 @@ const styles = StyleSheet.create({
   detailsHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 12,
   },
   videoTitle: {
     fontSize: 16,
     fontWeight: '700',
-    marginBottom: 6,
+    lineHeight: 22,
   },
   metaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
+    marginTop: 6,
   },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 6,
+    paddingHorizontal: 8,
+    borderRadius: 8,
   },
   statusBadgeText: {
     fontSize: 11,
@@ -555,23 +701,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingHorizontal: 10,
     paddingVertical: 6,
+    paddingHorizontal: 10,
     borderRadius: 8,
     borderWidth: 1,
   },
   deleteButtonText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
   },
   switchSection: {
     marginHorizontal: 16,
-    marginBottom: 20,
+    marginTop: 16,
   },
   switchSectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
     marginBottom: 10,
   },
   switchSectionTitle: {
@@ -589,10 +735,21 @@ const styles = StyleSheet.create({
   },
   nextItemTitle: {
     fontSize: 14,
-    marginBottom: 2,
   },
   nextItemSub: {
-    fontSize: 11,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  nowPlayingBadge: {
+    backgroundColor: '#38bdf8',
+    paddingVertical: 3,
+    paddingHorizontal: 7,
+    borderRadius: 6,
+  },
+  nowPlayingText: {
+    color: '#0a0a0c',
+    fontSize: 10,
+    fontWeight: '700',
   },
   emptyContainer: {
     flex: 1,
@@ -606,7 +763,7 @@ const styles = StyleSheet.create({
     borderRadius: 45,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 16,
   },
   emptyTitle: {
     fontSize: 20,
@@ -616,20 +773,66 @@ const styles = StyleSheet.create({
   emptySubtitle: {
     fontSize: 14,
     textAlign: 'center',
+    marginBottom: 20,
     lineHeight: 20,
-    marginBottom: 24,
   },
   emptyButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 20,
     paddingVertical: 12,
-    borderRadius: 14,
+    paddingHorizontal: 20,
+    borderRadius: 24,
   },
   emptyButtonText: {
-    color: '#ffffff',
-    fontSize: 15,
+    color: '#fff',
+    fontSize: 14,
     fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    justifyContent: 'flex-end',
+  },
+  qualitySheet: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
+  },
+  qualityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 16,
+  },
+  qualitySheetTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  qualityOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    marginBottom: 6,
+  },
+  qualityOptionText: {
+    fontSize: 15,
+    flex: 1,
+  },
+  qualityTag: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  qualityTagText: {
+    color: '#0a0a0c',
+    fontSize: 11,
+    fontWeight: '700',
   },
 });

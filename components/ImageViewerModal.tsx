@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   StyleSheet,
   View,
@@ -20,6 +20,7 @@ interface ImageViewerModalProps {
   visible: boolean;
   images: DriveItem[];
   initialIndex: number;
+  authToken?: string | null;
   onClose: () => void;
 }
 
@@ -27,6 +28,7 @@ export const ImageViewerModal: React.FC<ImageViewerModalProps> = ({
   visible,
   images,
   initialIndex,
+  authToken,
   onClose,
 }) => {
   const insets = useSafeAreaInsets();
@@ -44,6 +46,18 @@ export const ImageViewerModal: React.FC<ImageViewerModalProps> = ({
 
   const currentItem = images[currentIndex] || images[0];
   const { width: windowWidth, height: windowHeight } = Dimensions.get('window');
+
+  // Compute highest quality image source
+  const imageSource = useMemo(() => {
+    if (!currentItem) return undefined;
+    // thumbnailUrl with =s1600 provides direct high-res CDN access without 403
+    const uri = currentItem.thumbnailUrl || currentItem.downloadUrl;
+    const isGoogleApi = uri.includes('googleapis.com');
+    if (isGoogleApi && authToken) {
+      return { uri, headers: { Authorization: `Bearer ${authToken}` } };
+    }
+    return { uri };
+  }, [currentItem, authToken]);
 
   const handleNext = () => {
     if (currentIndex < images.length - 1) {
@@ -117,16 +131,18 @@ export const ImageViewerModal: React.FC<ImageViewerModalProps> = ({
               <ActivityIndicator size="large" color="#38bdf8" />
             </View>
           )}
-          <Image
-            source={{ uri: currentItem.downloadUrl }}
-            style={{ width: windowWidth, height: windowHeight * 0.72 }}
-            resizeMode="contain"
-            onLoadEnd={() => setImageLoaded(true)}
-          />
+          {imageSource && (
+            <Image
+              source={imageSource}
+              style={{ width: windowWidth, height: windowHeight * 0.72 }}
+              resizeMode="contain"
+              onLoadEnd={() => setImageLoaded(true)}
+            />
+          )}
         </ScrollView>
 
         {/* Bottom Navigation & Controls */}
-        <View style={[styles.bottomBar, { paddingBottom: insets.bottom > 0 ? insets.bottom + 12 : 20 }]}>
+        <View style={[styles.bottomBar, { paddingBottom: insets.bottom > 0 ? insets.bottom + 12 : 24 }]}>
           <TouchableOpacity
             onPress={handlePrev}
             disabled={currentIndex === 0}
@@ -199,7 +215,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   loadingBox: {
-    ...StyleSheet.absoluteFill,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 2,

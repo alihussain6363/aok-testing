@@ -96,27 +96,44 @@ export default function StorageScreen() {
 
   const handleItemPress = (item: LocalMediaItem) => {
     if (item.mediaKind === 'video') {
-      requestPlayVideo(item);
+      const localVideosList = allLocalItems.filter((i) => i.mediaKind === 'video');
+      requestPlayVideo(item, localVideosList, 'stream');
     } else if (item.mediaKind === 'audio') {
-      const driveItem = {
+      const localAudioList = allLocalItems
+        .filter((i) => i.mediaKind === 'audio')
+        .map((a) => ({
+          id: a.googleDriveId || a.id,
+          name: a.title,
+          isFolder: false,
+          kind: 'audio' as const,
+          downloadUrl: a.localUri,
+          thumbnailUrl: a.thumbnailUrl,
+          source: 'google_drive' as const,
+        }));
+      const currentTrack = {
         id: item.googleDriveId || item.id,
         name: item.title,
         isFolder: false,
         kind: 'audio' as const,
         downloadUrl: item.localUri,
+        thumbnailUrl: item.thumbnailUrl,
         source: 'google_drive' as const,
       };
-      requestPlayAudio(driveItem);
+      requestPlayAudio(currentTrack, localAudioList);
     } else if (item.mediaKind === 'image') {
-      const driveItem = {
-        id: item.googleDriveId || item.id,
-        name: item.title,
-        isFolder: false,
-        kind: 'image' as const,
-        downloadUrl: item.localUri,
-        source: 'google_drive' as const,
-      };
-      requestViewImages([driveItem], 0);
+      const localImagesList = allLocalItems
+        .filter((i) => i.mediaKind === 'image')
+        .map((img) => ({
+          id: img.googleDriveId || img.id,
+          name: img.title,
+          isFolder: false,
+          kind: 'image' as const,
+          downloadUrl: img.localUri,
+          thumbnailUrl: img.localUri,
+          source: 'google_drive' as const,
+        }));
+      const idx = localImagesList.findIndex((i) => i.id === (item.googleDriveId || item.id));
+      requestViewImages(localImagesList, idx >= 0 ? idx : 0);
     }
   };
 

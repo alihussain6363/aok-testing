@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -8,6 +8,7 @@ import {
   Dimensions,
   ActivityIndicator,
   Alert,
+  FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -19,6 +20,7 @@ interface MusicPlayerModalProps {
   visible: boolean;
   playlist: DriveItem[];
   currentIndex: number;
+  authToken?: string | null;
   onClose: () => void;
   onTrackChange?: (index: number) => void;
 }
@@ -27,6 +29,7 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
   visible,
   playlist,
   currentIndex: initialIndex,
+  authToken,
   onClose,
   onTrackChange,
 }) => {
@@ -38,6 +41,7 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
   const [isLooping, setIsLooping] = useState(false);
   const [isShuffle, setIsShuffle] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [showQueue, setShowQueue] = useState(false);
 
   useEffect(() => {
     setIndex(initialIndex);
@@ -45,11 +49,36 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
 
   const currentTrack = playlist[index] || playlist[0];
 
-  const player = useVideoPlayer(currentTrack ? currentTrack.downloadUrl : '', (p) => {
+  // Helper to build audio source with Google Drive auth header
+  const getAudioSource = (item: DriveItem) => {
+    if (!item) return '';
+    const isGoogleApi = item.downloadUrl.includes('googleapis.com');
+    if (isGoogleApi && authToken) {
+      return {
+        uri: item.downloadUrl,
+        headers: { Authorization: `Bearer ${authToken}` },
+      };
+    }
+    return item.downloadUrl;
+  };
+
+  // Initialize expo-video player for audio playback
+  const player = useVideoPlayer(currentTrack ? (getAudioSource(currentTrack) as any) : null, (p) => {
     p.loop = isLooping;
     p.play();
   });
 
+  // When track or index changes, replace player source
+  useEffect(() => {
+    if (player && currentTrack && visible) {
+      const src = getAudioSource(currentTrack);
+      player.replace(src as any);
+      player.play();
+      setIsPlaying(true);
+    }
+  }, [index, currentTrack?.id, visible, authToken]);
+
+  // Synchronize playback events
   useEffect(() => {
     if (!player) return;
     player.loop = isLooping;
@@ -109,6 +138,12 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
     onTrackChange?.(prevIdx);
   };
 
+  const handleSeek = (ratio: number) => {
+    if (!player || duration <= 0) return;
+    const target = Math.max(0, Math.min(duration, ratio * duration));
+    player.currentTime = target;
+  };
+
   const handleSaveMusic = async () => {
     setIsSaving(true);
     try {
@@ -133,92 +168,159 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.backdrop}>
-        {/* Hidden video view for audio playback */}
-        <VideoView player={player} style={styles.hiddenVideo} />
+        {/* Invisible VideoView container so expo-video audio pipeline processes on Android */}
+        <View style={{ width: 1, height: 1, opacity: 0, position: 'absolute' }}>
+          <VideoView style={{ width: 1, height: 1 }} player={player} />
+        </View>
 
-        {/* Top Header */}
+        {/* Header Bar */}
         <View style={[styles.headerBar, { paddingTop: insets.top > 0 ? insets.top + 8 : 16 }]}>
-          <TouchableOpacity onPress={onClose} style={styles.circleIconBtn}>
+          <TouchableOpacity onPress={onClose} style={styles.iconBtn}>
             <Ionicons name="chevron-down" size={26} color="#fff" />
           </TouchableOpacity>
-          <View style={styles.headerTextBox}>
-            <Text style={styles.headerSuper}>PLAYING FROM DRIVE</Text>
-            <Text style={styles.headerTrackTitle} numberOfLines={1}>
+          <View style={styles.headerTitleBox}>
+            <Text style={styles.headerCategory}>PLAYING FROM FOLDER</Text>
+            <Text style={styles.headerFolderName} numberOfLines={1}>
               {currentTrack.name}
             </Text>
           </View>
-          <TouchableOpacity onPress={handleSaveMusic} style={styles.circleIconBtn} disabled={isSaving}>
-            {isSaving ? (
-              <ActivityIndicator size="small" color="#38bdf8" />
-            ) : (
-              <Ionicons name="arrow-down-circle-outline" size={24} color="#fff" />
-            )}
+          <TouchableOpacity
+            onPress={() => setShowQueue(!showQueue)}
+            style={[styles.iconBtn, showQueue && { backgroundColor: '#38bdf8' }]}>
+            <Ionicons name="list" size={22} color={showQueue ? '#0a0a0c' : '#fff'} />
           </TouchableOpacity>
         </View>
 
-        {/* Vinyl / Album Art Display */}
-        <View style={styles.artContainer}>
-          <View style={styles.vinylDisk}>
-            <View style={styles.vinylGrooves}>
-              <View style={styles.vinylCenter}>
-                <Ionicons name="musical-notes" size={44} color="#38bdf8" />
+        {/* Content Body: Either Now Playing or Folder Queue */}
+        {showQueue ? (
+          <View style={styles.queueContainer}>
+            <Text style={styles.queueHeaderTitle}>Folder Music Queue ({playlist.length})</Text>
+            <FlatList
+              data={playlist}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item, index: itemIdx }) => {
+                const isSelected = itemIdx === index;
+                return (
+                  <TouchableOpacity
+                    style={[styles.queueItem, isSelected && styles.queueItemActive]}
+                    onPress={() => {
+                      setIndex(itemIdx);
+                      onTrackChange?.(itemIdx);
+                    }}>
+                    <Ionicons
+                      name={isSelected ? 'musical-notes' : 'musical-note-outline'}
+                      size={20}
+                      color={isSelected ? '#38bdf8' : '#94a3b8'}
+                      style={{ marginRight: 12 }}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[styles.queueItemName, isSelected && { color: '#38bdf8', fontWeight: '700' }]}
+                        numberOfLines={1}>
+                        {item.name}
+                      </Text>
+                      <Text style={styles.queueItemSize}>
+                        {item.sizeBytes ? formatBytes(item.sizeBytes) : 'Google Drive'}
+                      </Text>
+                    </View>
+                    {isSelected && <Ionicons name="volume-high" size={18} color="#38bdf8" />}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          </View>
+        ) : (
+          <View style={styles.playerBody}>
+            {/* Vinyl / Album Art Disc with Glowing Ring */}
+            <View style={styles.discWrapper}>
+              <View style={styles.discGlow} />
+              <View style={styles.disc}>
+                <Ionicons name="disc-outline" size={120} color="#38bdf8" />
+                <View style={styles.discCenter}>
+                  <Ionicons name="musical-notes" size={32} color="#fff" />
+                </View>
               </View>
             </View>
+
+            {/* Song Meta Info */}
+            <View style={styles.songMetaBox}>
+              <Text style={styles.songTitle} numberOfLines={2}>
+                {currentTrack.name}
+              </Text>
+              <Text style={styles.songSubtitle}>
+                Track {index + 1} of {playlist.length} • {currentTrack.sizeBytes ? formatBytes(currentTrack.sizeBytes) : 'Drive Audio'}
+              </Text>
+            </View>
+
+            {/* Progress Slider */}
+            <View style={styles.progressContainer}>
+              <TouchableOpacity
+                activeOpacity={1}
+                style={styles.progressBarBg}
+                onPress={(e) => {
+                  const width = Dimensions.get('window').width - 48;
+                  const clickX = e.nativeEvent.locationX;
+                  handleSeek(clickX / width);
+                }}>
+                <View style={[styles.progressBarFill, { width: `${progressPercent}%` }]} />
+              </TouchableOpacity>
+              <View style={styles.timeRow}>
+                <Text style={styles.timeText}>{formatSeconds(currentTime)}</Text>
+                <Text style={styles.timeText}>{formatSeconds(duration)}</Text>
+              </View>
+            </View>
+
+            {/* Main Controls */}
+            <View style={styles.controlsRow}>
+              <TouchableOpacity
+                onPress={() => setIsShuffle(!isShuffle)}
+                style={[styles.secBtn, isShuffle && styles.secBtnActive]}>
+                <Ionicons name="shuffle" size={20} color={isShuffle ? '#38bdf8' : '#94a3b8'} />
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={handlePrev} style={styles.mainCtrlBtn}>
+                <Ionicons name="play-skip-back" size={28} color="#fff" />
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={togglePlayPause} style={styles.playPauseBtn}>
+                <Ionicons name={isPlaying ? 'pause' : 'play'} size={34} color="#0a0a0c" />
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={handleNext} style={styles.mainCtrlBtn}>
+                <Ionicons name="play-skip-forward" size={28} color="#fff" />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => setIsLooping(!isLooping)}
+                style={[styles.secBtn, isLooping && styles.secBtnActive]}>
+                <Ionicons name="repeat" size={20} color={isLooping ? '#38bdf8' : '#94a3b8'} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Save to Phone Offline Button */}
+            <TouchableOpacity
+              onPress={handleSaveMusic}
+              style={styles.downloadTrackBtn}
+              disabled={isSaving}
+              activeOpacity={0.8}>
+              {isSaving ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="cloud-download-outline" size={18} color="#fff" />
+                  <Text style={styles.downloadTrackBtnText}>Save to Phone Library</Text>
+                </>
+              )}
+            </TouchableOpacity>
           </View>
-        </View>
+        )}
 
-        {/* Track Metadata */}
-        <View style={styles.metaContainer}>
-          <Text style={styles.trackTitleText} numberOfLines={2}>
-            {currentTrack.name}
-          </Text>
-          <Text style={styles.trackSubtitleText}>
-            Track {index + 1} of {playlist.length} • {currentTrack.sizeBytes ? formatBytes(currentTrack.sizeBytes) : 'Google Drive Audio'}
-          </Text>
-        </View>
-
-        {/* Progress Bar & Timestamps */}
-        <View style={styles.progressContainer}>
-          <View style={styles.progressBarBg}>
-            <View style={[styles.progressBarFill, { width: `${progressPercent}%` }]} />
-          </View>
-          <View style={styles.timeRow}>
-            <Text style={styles.timeText}>{formatSeconds(currentTime)}</Text>
-            <Text style={styles.timeText}>{formatSeconds(duration)}</Text>
-          </View>
-        </View>
-
-        {/* Controls Bar */}
-        <View style={[styles.controlsContainer, { paddingBottom: insets.bottom > 0 ? insets.bottom + 16 : 24 }]}>
-          <TouchableOpacity
-            onPress={() => setIsShuffle(!isShuffle)}
-            style={[styles.smallBtn, isShuffle && styles.activeBtn]}>
-            <Ionicons name="shuffle" size={22} color={isShuffle ? '#38bdf8' : '#94a3b8'} />
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={handlePrev} style={styles.mediumBtn}>
-            <Ionicons name="play-skip-back" size={28} color="#fff" />
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={togglePlayPause} style={styles.playPauseBtn}>
-            <Ionicons name={isPlaying ? 'pause' : 'play'} size={36} color="#0f172a" />
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={handleNext} style={styles.mediumBtn}>
-            <Ionicons name="play-skip-forward" size={28} color="#fff" />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={() => setIsLooping(!isLooping)}
-            style={[styles.smallBtn, isLooping && styles.activeBtn]}>
-            <Ionicons name="repeat" size={22} color={isLooping ? '#38bdf8' : '#94a3b8'} />
-          </TouchableOpacity>
-        </View>
+        <View style={{ height: insets.bottom + 8 }} />
       </View>
     </Modal>
   );
@@ -227,110 +329,109 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: '#090d16',
-    justifyContent: 'space-between',
-  },
-  hiddenVideo: {
-    width: 1,
-    height: 1,
-    opacity: 0,
-    position: 'absolute',
+    backgroundColor: '#0c0e14',
   },
   headerBar: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingBottom: 10,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.08)',
   },
-  headerTextBox: {
-    flex: 1,
-    alignItems: 'center',
-    marginHorizontal: 12,
-  },
-  headerSuper: {
-    color: '#38bdf8',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-  },
-  headerTrackTitle: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  circleIconBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  iconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  artContainer: {
+  headerTitleBox: {
     alignItems: 'center',
-    justifyContent: 'center',
-    marginVertical: 10,
+    flex: 1,
+    paddingHorizontal: 12,
   },
-  vinylDisk: {
-    width: Dimensions.get('window').width * 0.65,
-    height: Dimensions.get('window').width * 0.65,
-    maxWidth: 280,
-    maxHeight: 280,
-    borderRadius: 140,
-    backgroundColor: '#111827',
-    borderWidth: 8,
-    borderColor: '#1f2937',
+  headerCategory: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+  },
+  headerFolderName: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  playerBody: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'space-evenly',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+  },
+  discWrapper: {
+    width: 240,
+    height: 240,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#38bdf8',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.25,
-    shadowRadius: 20,
-    elevation: 8,
+    position: 'relative',
   },
-  vinylGrooves: {
-    width: '84%',
-    height: '84%',
-    borderRadius: 120,
+  discGlow: {
+    position: 'absolute',
+    width: 230,
+    height: 230,
+    borderRadius: 115,
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+  },
+  disc: {
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: '#161922',
+    justifyContent: 'center',
+    alignItems: 'center',
     borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
+    borderColor: 'rgba(56, 189, 248, 0.4)',
+    elevation: 8,
+    shadowColor: '#38bdf8',
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
+  discCenter: {
+    position: 'absolute',
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: '#0284c7',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  vinylCenter: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    backgroundColor: '#1e293b',
-    borderWidth: 3,
-    borderColor: '#38bdf8',
-    justifyContent: 'center',
+  songMetaBox: {
     alignItems: 'center',
+    width: '100%',
+    paddingHorizontal: 16,
   },
-  metaContainer: {
-    paddingHorizontal: 28,
-    alignItems: 'center',
-  },
-  trackTitleText: {
-    color: '#ffffff',
+  songTitle: {
+    color: '#fff',
     fontSize: 20,
     fontWeight: '700',
     textAlign: 'center',
   },
-  trackSubtitleText: {
+  songSubtitle: {
     color: '#94a3b8',
     fontSize: 13,
     marginTop: 6,
-    textAlign: 'center',
   },
   progressContainer: {
-    paddingHorizontal: 28,
+    width: '100%',
   },
   progressBarBg: {
     height: 6,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
     borderRadius: 3,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
     overflow: 'hidden',
   },
   progressBarFill: {
@@ -344,44 +445,88 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   timeText: {
-    color: '#64748b',
+    color: '#94a3b8',
     fontSize: 12,
     fontWeight: '500',
   },
-  controlsContainer: {
+  controlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-evenly',
-    paddingHorizontal: 16,
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 8,
   },
-  smallBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    justifyContent: 'center',
-    alignItems: 'center',
+  secBtn: {
+    padding: 10,
+    borderRadius: 20,
   },
-  activeBtn: {
+  secBtnActive: {
     backgroundColor: 'rgba(56, 189, 248, 0.15)',
   },
-  mediumBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    justifyContent: 'center',
-    alignItems: 'center',
+  mainCtrlBtn: {
+    padding: 12,
   },
   playPauseBtn: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 68,
+    height: 68,
+    borderRadius: 34,
     backgroundColor: '#38bdf8',
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#38bdf8',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
+    shadowOpacity: 0.5,
+    shadowRadius: 14,
     elevation: 6,
+  },
+  downloadTrackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 12,
+    paddingHorizontal: 22,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  downloadTrackBtnText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  queueContainer: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+  },
+  queueHeaderTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  queueItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    marginBottom: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+  },
+  queueItemActive: {
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.3)',
+  },
+  queueItemName: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  queueItemSize: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 2,
   },
 });

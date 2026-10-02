@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
   View,
@@ -11,11 +11,12 @@ import {
   Modal,
   ActivityIndicator,
   RefreshControl,
+  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { usePlayback } from '@/context/PlaybackContext';
+import { usePlayback, type PlaybackMode } from '@/context/PlaybackContext';
 import {
   SAMPLE_VIDEOS,
   SERVICE_ACCOUNT,
@@ -41,12 +42,23 @@ export default function DriveScreen() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme];
   const insets = useSafeAreaInsets();
-  const { requestPlayVideo, requestPlayAudio, requestViewImages, localVideos } = usePlayback();
+  const {
+    requestPlayVideo,
+    requestPlayAudio,
+    requestViewImages,
+    localVideos,
+    downloadState,
+    authToken,
+  } = usePlayback();
 
   const [driveUrlInput, setDriveUrlInput] = useState('');
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [copiedEmail, setCopiedEmail] = useState(false);
   const [activeCategory, setActiveCategory] = useState<FilterCategory>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Selected item for the Media Action Sheet
+  const [selectedActionItem, setSelectedActionItem] = useState<DriveItem | null>(null);
 
   // Folder navigation state
   const [folderStack, setFolderStack] = useState<FolderBreadcrumb[]>([{ name: 'All Shared Folders' }]);
@@ -88,6 +100,7 @@ export default function DriveScreen() {
     const nextBreadcrumb: FolderBreadcrumb = { id: folder.id, name: folder.name };
     setFolderStack((prev) => [...prev, nextBreadcrumb]);
     setActiveCategory('all');
+    setSearchQuery('');
     loadFolder(folder.id);
   };
 
@@ -97,6 +110,7 @@ export default function DriveScreen() {
     const target = folderStack[index];
     setFolderStack((prev) => prev.slice(0, index + 1));
     setActiveCategory('all');
+    setSearchQuery('');
     loadFolder(target.id);
   };
 
@@ -106,6 +120,7 @@ export default function DriveScreen() {
     const newStack = folderStack.slice(0, folderStack.length - 1);
     setFolderStack(newStack);
     setActiveCategory('all');
+    setSearchQuery('');
     const parentFolder = newStack[newStack.length - 1];
     loadFolder(parentFolder.id);
   };
@@ -136,11 +151,10 @@ export default function DriveScreen() {
     }
 
     try {
-      const token = await getValidAccessToken();
-      const downloadUrl = buildDriveDownloadUrl(fileId, token);
+      const downloadUrl = buildDriveDownloadUrl(fileId);
       const driveItem: DriveItem = {
         id: fileId,
-        name: `Drive Video (${fileId.slice(0, 8)})`,
+        name: `Drive Media (${fileId.slice(0, 8)})`,
         isFolder: false,
         kind: 'video',
         downloadUrl,
@@ -148,9 +162,32 @@ export default function DriveScreen() {
       };
 
       setDriveUrlInput('');
-      await requestPlayVideo(driveItem);
+      await requestPlayVideo(driveItem, [driveItem], 'stream');
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Could not authenticate with Google Drive');
+    }
+  };
+
+  // In-folder media collections for continuous playback
+  const folderVideos = useMemo(() => driveItems.filter((i) => i.kind === 'video'), [driveItems]);
+  const folderAudio = useMemo(() => driveItems.filter((i) => i.kind === 'audio'), [driveItems]);
+  const folderImages = useMemo(() => driveItems.filter((i) => i.kind === 'image'), [driveItems]);
+
+  // Handle Playback Execution with chosen mode
+  const executePlayMedia = async (item: DriveItem, mode: PlaybackMode = 'stream') => {
+    setSelectedActionItem(null);
+
+    if (item.kind === 'video') {
+      await requestPlayVideo(item, folderVideos, mode);
+    } else if (item.kind === 'audio') {
+      if (mode === 'download_only') {
+        await requestPlayVideo(item as any, undefined, 'download_only');
+      } else {
+        requestPlayAudio(item, folderAudio);
+      }
+    } else if (item.kind === 'image') {
+      const idx = folderImages.findIndex((i) => i.id === item.id);
+      requestViewImages(folderImages, idx >= 0 ? idx : 0);
     }
   };
 
@@ -158,37 +195,36 @@ export default function DriveScreen() {
   const handleItemPress = (item: DriveItem) => {
     if (item.isFolder) {
       handleOpenFolder(item);
-    } else if (item.kind === 'video') {
-      requestPlayVideo(item);
-    } else if (item.kind === 'audio') {
-      const audioPlaylist = driveItems.filter((i) => i.kind === 'audio');
-      requestPlayAudio(item, audioPlaylist);
-    } else if (item.kind === 'image') {
-      const imageGallery = driveItems.filter((i) => i.kind === 'image');
-      const idx = imageGallery.findIndex((i) => i.id === item.id);
-      requestViewImages(imageGallery, idx >= 0 ? idx : 0);
     } else {
-      // Default to video/media player
-      requestPlayVideo(item);
+      // Open Media Action Sheet for rich options: Stream / Stream & Download / Download
+      setSelectedActionItem(item);
     }
   };
 
-  // Counts by media kind
+  // Filtered & searched items
+  const filteredItems = useMemo(() => {
+    return driveItems.filter((item) => {
+      // Category filter
+      if (activeCategory === 'folder' && !item.isFolder) return false;
+      if (activeCategory !== 'all' && activeCategory !== 'folder' && item.kind !== activeCategory) return false;
+      // Search query filter
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        return item.name.toLowerCase().includes(q);
+      }
+      return true;
+    });
+  }, [driveItems, activeCategory, searchQuery]);
+
   const folderCount = driveItems.filter((i) => i.isFolder).length;
   const videoCount = driveItems.filter((i) => i.kind === 'video').length;
   const audioCount = driveItems.filter((i) => i.kind === 'audio').length;
   const imageCount = driveItems.filter((i) => i.kind === 'image').length;
 
-  const filteredItems = driveItems.filter((item) => {
-    if (activeCategory === 'all') return true;
-    if (activeCategory === 'folder') return item.isFolder;
-    return item.kind === activeCategory;
-  });
-
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: theme.background }]}
-      contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+      contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
       refreshControl={
         <RefreshControl
           refreshing={isRefreshing}
@@ -206,7 +242,7 @@ export default function DriveScreen() {
           <View style={{ flex: 1 }}>
             <Text style={[styles.heroTitle, { color: theme.text }]}>Google Drive Explorer</Text>
             <Text style={[styles.heroSubtitle, { color: theme.textSecondary }]}>
-              Auto-authenticated • Instant streaming & downloading
+              Auto-authenticated • Stream & in-folder playlist
             </Text>
           </View>
           <TouchableOpacity
@@ -234,7 +270,7 @@ export default function DriveScreen() {
             <Ionicons name="link-outline" size={20} color={theme.textSecondary} style={{ marginRight: 8 }} />
             <TextInput
               style={[styles.input, { color: theme.text }]}
-              placeholder="Paste Google Drive video link or ID..."
+              placeholder="Paste Google Drive link or ID..."
               placeholderTextColor={theme.textSecondary}
               value={driveUrlInput}
               onChangeText={setDriveUrlInput}
@@ -308,6 +344,25 @@ export default function DriveScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* In-Folder Search Bar */}
+      {driveItems.length > 0 && (
+        <View style={[styles.searchBox, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
+          <Ionicons name="search-outline" size={18} color={theme.textSecondary} style={{ marginRight: 8 }} />
+          <TextInput
+            style={[styles.searchInput, { color: theme.text }]}
+            placeholder={`Search in ${currentFolder.name}...`}
+            placeholderTextColor={theme.textSecondary}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+          />
+          {searchQuery.length > 0 && (
+            <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 4 }}>
+              <Ionicons name="close-circle" size={16} color={theme.textSecondary} />
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
 
       {/* Category Filter Chips */}
       {driveItems.length > 0 && (
@@ -396,6 +451,21 @@ export default function DriveScreen() {
         </ScrollView>
       )}
 
+      {/* Global Background Download Banner */}
+      {downloadState.isDownloading && (
+        <View style={[styles.downloadNotice, { backgroundColor: theme.cardBackground, borderColor: theme.primary }]}>
+          <Ionicons name="cloud-download" size={20} color={theme.primary} />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.downloadNoticeTitle, { color: theme.text }]}>
+              Downloading {downloadState.title} ({downloadState.progressPercent}%)
+            </Text>
+            <View style={styles.downloadNoticeBar}>
+              <View style={[styles.downloadNoticeFill, { width: `${downloadState.progressPercent}%` }]} />
+            </View>
+          </View>
+        </View>
+      )}
+
       {/* Loading Indicator */}
       {isLoading && (
         <View style={styles.centerLoading}>
@@ -419,7 +489,7 @@ export default function DriveScreen() {
         </View>
       )}
 
-      {/* Empty State / How to Share Folder Guidance */}
+      {/* Empty State / How to Share Guidance */}
       {!isLoading && !errorMsg && driveItems.length === 0 && (
         <View
           style={[
@@ -469,7 +539,7 @@ export default function DriveScreen() {
         </View>
       )}
 
-      {/* Main Drive Items Grid & List */}
+      {/* Main Drive Items List */}
       {!isLoading && filteredItems.length > 0 && (
         <View style={styles.sectionContainer}>
           {filteredItems.map((item) => {
@@ -477,111 +547,127 @@ export default function DriveScreen() {
             const isFolder = item.isFolder;
 
             return (
-              <TouchableOpacity
+              <View
                 key={item.id}
                 style={[
                   styles.itemCard,
                   { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder },
-                ]}
-                onPress={() => handleItemPress(item)}
-                activeOpacity={0.7}>
-                {/* Media Icon Badge */}
-                <View
-                  style={[
-                    styles.itemIconBadge,
-                    {
-                      backgroundColor: isFolder
-                        ? 'rgba(245, 158, 11, 0.15)'
-                        : item.kind === 'video'
-                        ? 'rgba(2, 132, 199, 0.15)'
-                        : item.kind === 'audio'
-                        ? 'rgba(168, 85, 247, 0.15)'
-                        : 'rgba(16, 185, 129, 0.15)',
-                    },
-                  ]}>
-                  <Ionicons
-                    name={
-                      isFolder
-                        ? 'folder'
-                        : item.kind === 'video'
-                        ? 'film'
-                        : item.kind === 'audio'
-                        ? 'musical-notes'
-                        : 'image'
-                    }
-                    size={24}
-                    color={
-                      isFolder
-                        ? '#f59e0b'
-                        : item.kind === 'video'
-                        ? '#0284c7'
-                        : item.kind === 'audio'
-                        ? '#a855f7'
-                        : '#10b981'
-                    }
-                  />
-                </View>
+                ]}>
+                {/* Clickable Area for Full Item */}
+                <TouchableOpacity
+                  style={styles.itemMainRow}
+                  onPress={() => handleItemPress(item)}
+                  activeOpacity={0.7}>
+                  {/* Media Icon Badge */}
+                  <View
+                    style={[
+                      styles.itemIconBadge,
+                      {
+                        backgroundColor: isFolder
+                          ? 'rgba(245, 158, 11, 0.15)'
+                          : item.kind === 'video'
+                          ? 'rgba(2, 132, 199, 0.15)'
+                          : item.kind === 'audio'
+                          ? 'rgba(168, 85, 247, 0.15)'
+                          : 'rgba(16, 185, 129, 0.15)',
+                      },
+                    ]}>
+                    <Ionicons
+                      name={
+                        isFolder
+                          ? 'folder'
+                          : item.kind === 'video'
+                          ? 'film'
+                          : item.kind === 'audio'
+                          ? 'musical-notes'
+                          : 'image'
+                      }
+                      size={24}
+                      color={
+                        isFolder
+                          ? '#f59e0b'
+                          : item.kind === 'video'
+                          ? '#0284c7'
+                          : item.kind === 'audio'
+                          ? '#a855f7'
+                          : '#10b981'
+                      }
+                    />
+                  </View>
 
-                {/* Metadata */}
-                <View style={styles.itemMeta}>
-                  <Text style={[styles.itemTitle, { color: theme.text }]} numberOfLines={1}>
-                    {item.name}
-                  </Text>
-                  <Text style={[styles.itemSub, { color: theme.textSecondary }]}>
-                    {isFolder
-                      ? 'Folder • Tap to open'
-                      : `${item.sizeBytes ? formatBytes(item.sizeBytes) : 'Google Drive'} • ${
-                          item.kind.toUpperCase()
-                        }`}
-                  </Text>
-                  {isLocal && (
-                    <View style={[styles.downloadedChip, { backgroundColor: theme.successLight }]}>
-                      <Ionicons name="checkmark-done" size={12} color={theme.success} />
-                      <Text style={[styles.downloadedChipText, { color: theme.success }]}>
-                        Saved on Phone
-                      </Text>
-                    </View>
-                  )}
-                </View>
+                  {/* Metadata */}
+                  <View style={styles.itemMeta}>
+                    <Text style={[styles.itemTitle, { color: theme.text }]} numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    <Text style={[styles.itemSub, { color: theme.textSecondary }]}>
+                      {isFolder
+                        ? 'Folder • Tap to open'
+                        : `${item.sizeBytes ? formatBytes(item.sizeBytes) : 'Drive'} • ${item.kind.toUpperCase()}`}
+                    </Text>
+                    {isLocal && (
+                      <View style={[styles.downloadedChip, { backgroundColor: theme.successLight }]}>
+                        <Ionicons name="checkmark-done" size={12} color={theme.success} />
+                        <Text style={[styles.downloadedChipText, { color: theme.success }]}>
+                          Saved on Phone
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </TouchableOpacity>
 
-                {/* Trailing Action Icon */}
-                <View
-                  style={[
-                    styles.actionCircle,
-                    {
-                      backgroundColor: isFolder ? 'transparent' : theme.primaryLight,
-                    },
-                  ]}>
-                  <Ionicons
-                    name={
-                      isFolder
-                        ? 'chevron-forward'
-                        : item.kind === 'video'
-                        ? 'play'
-                        : item.kind === 'audio'
-                        ? 'play'
-                        : 'expand'
-                    }
-                    size={18}
-                    color={isFolder ? theme.textSecondary : theme.primary}
-                  />
-                </View>
-              </TouchableOpacity>
+                {/* Quick Action Buttons for Non-Folders */}
+                {!isFolder && (
+                  <View style={styles.quickActionsRow}>
+                    {/* Stream Play Quick Button */}
+                    <TouchableOpacity
+                      style={[styles.quickPillBtn, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}
+                      onPress={() => executePlayMedia(item, 'stream')}
+                      activeOpacity={0.7}>
+                      <Ionicons name="play" size={13} color={theme.primary} />
+                      <Text style={[styles.quickPillText, { color: theme.primary }]}>Stream</Text>
+                    </TouchableOpacity>
+
+                    {/* Download Quick Button */}
+                    <TouchableOpacity
+                      style={[styles.quickPillBtn, { backgroundColor: 'rgba(255, 255, 255, 0.06)' }]}
+                      onPress={() => executePlayMedia(item, 'download_only')}
+                      activeOpacity={0.7}>
+                      <Ionicons name="cloud-download-outline" size={13} color={theme.text} />
+                      <Text style={[styles.quickPillText, { color: theme.text }]}>Download</Text>
+                    </TouchableOpacity>
+
+                    {/* More Options */}
+                    <TouchableOpacity
+                      style={styles.moreIconBtn}
+                      onPress={() => setSelectedActionItem(item)}>
+                      <Ionicons name="ellipsis-vertical" size={18} color={theme.textSecondary} />
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                {/* Folder Chevron */}
+                {isFolder && (
+                  <TouchableOpacity onPress={() => handleOpenFolder(item)} style={{ padding: 8 }}>
+                    <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
+                  </TouchableOpacity>
+                )}
+              </View>
             );
           })}
         </View>
       )}
 
-      {/* Sample Videos Section (for testing) */}
+      {/* Sample Videos Section (for testing gestures & controls) */}
       <View style={styles.sectionContainer}>
         <View style={styles.sectionHeaderRow}>
           <Ionicons name="sparkles" size={20} color={theme.accent} />
           <Text style={[styles.sectionTitle, { color: theme.text }]}>
-            Sample Videos (Test Touch Controls & Auto-Delete)
+            Sample Demo Clips
           </Text>
         </View>
         <Text style={[styles.sectionSubtitle, { color: theme.textSecondary }]}>
-          Test MX Player drag-gestures, offline download, and cleanup with these sample clips:
+          Test offline playback, touch gestures, and quality switches with these sample clips:
         </Text>
 
         {SAMPLE_VIDEOS.map((item) => {
@@ -593,7 +679,7 @@ export default function DriveScreen() {
                 styles.itemCard,
                 { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder },
               ]}
-              onPress={() => requestPlayVideo(item)}
+              onPress={() => requestPlayVideo(item, SAMPLE_VIDEOS, 'stream')}
               activeOpacity={0.7}>
               {item.thumbnailUrl ? (
                 <Image source={{ uri: item.thumbnailUrl }} style={styles.sampleThumb} />
@@ -625,6 +711,103 @@ export default function DriveScreen() {
           );
         })}
       </View>
+
+      {/* Media Action Sheet Modal: Stream / Stream & Download / Download for Later */}
+      <Modal
+        visible={!!selectedActionItem}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedActionItem(null)}>
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setSelectedActionItem(null)}>
+          <View
+            style={[
+              styles.actionSheetCard,
+              { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder },
+            ]}>
+            {/* Sheet Header */}
+            <View style={styles.actionSheetHeader}>
+              <View style={[styles.sheetMediaIcon, { backgroundColor: theme.primaryLight }]}>
+                <Ionicons
+                  name={
+                    selectedActionItem?.kind === 'video'
+                      ? 'film'
+                      : selectedActionItem?.kind === 'audio'
+                      ? 'musical-notes'
+                      : 'image'
+                  }
+                  size={24}
+                  color={theme.primary}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.actionSheetTitle, { color: theme.text }]} numberOfLines={2}>
+                  {selectedActionItem?.name}
+                </Text>
+                <Text style={[styles.actionSheetSub, { color: theme.textSecondary }]}>
+                  {selectedActionItem?.sizeBytes ? formatBytes(selectedActionItem.sizeBytes) : 'Google Drive'} • In {currentFolder.name}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setSelectedActionItem(null)} style={{ padding: 4 }}>
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Option 1: Stream Play */}
+            <TouchableOpacity
+              style={[styles.sheetOptionCard, { backgroundColor: theme.background, borderColor: theme.cardBorder }]}
+              onPress={() => selectedActionItem && executePlayMedia(selectedActionItem, 'stream')}
+              activeOpacity={0.7}>
+              <View style={[styles.sheetOptionIconBox, { backgroundColor: 'rgba(56, 189, 248, 0.15)' }]}>
+                <Ionicons name="flash" size={22} color="#38bdf8" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.sheetOptionTitle, { color: theme.text }]}>Stream Play Now</Text>
+                <Text style={[styles.sheetOptionDesc, { color: theme.textSecondary }]}>
+                  Instant playback with zero device storage used
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={theme.textSecondary} />
+            </TouchableOpacity>
+
+            {/* Option 2: Stream & Download */}
+            <TouchableOpacity
+              style={[styles.sheetOptionCard, { backgroundColor: theme.background, borderColor: theme.cardBorder }]}
+              onPress={() => selectedActionItem && executePlayMedia(selectedActionItem, 'stream_and_download')}
+              activeOpacity={0.7}>
+              <View style={[styles.sheetOptionIconBox, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
+                <Ionicons name="rocket" size={22} color="#10b981" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.sheetOptionTitle, { color: theme.text }]}>Stream & Download</Text>
+                <Text style={[styles.sheetOptionDesc, { color: theme.textSecondary }]}>
+                  Play right away and save to local storage in background
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={theme.textSecondary} />
+            </TouchableOpacity>
+
+            {/* Option 3: Download for Later */}
+            <TouchableOpacity
+              style={[styles.sheetOptionCard, { backgroundColor: theme.background, borderColor: theme.cardBorder }]}
+              onPress={() => selectedActionItem && executePlayMedia(selectedActionItem, 'download_only')}
+              activeOpacity={0.7}>
+              <View style={[styles.sheetOptionIconBox, { backgroundColor: 'rgba(168, 85, 247, 0.15)' }]}>
+                <Ionicons name="cloud-download" size={22} color="#a855f7" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.sheetOptionTitle, { color: theme.text }]}>Download for Later</Text>
+                <Text style={[styles.sheetOptionDesc, { color: theme.textSecondary }]}>
+                  Save to phone library for offline viewing later
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={theme.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* Service Account Information Modal */}
       <Modal visible={showAccountModal} transparent animationType="slide">
@@ -806,6 +989,19 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginLeft: 6,
   },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    height: 42,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+  },
   filterScroll: {
     flexDirection: 'row',
     gap: 8,
@@ -821,6 +1017,31 @@ const styles = StyleSheet.create({
   filterChipText: {
     fontSize: 12,
     fontWeight: '600',
+  },
+  downloadNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  downloadNoticeTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  downloadNoticeBar: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    overflow: 'hidden',
+  },
+  downloadNoticeFill: {
+    height: '100%',
+    backgroundColor: '#38bdf8',
+    borderRadius: 2,
   },
   centerLoading: {
     paddingVertical: 40,
@@ -951,12 +1172,14 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   itemCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
     borderRadius: 16,
     borderWidth: 1,
     marginBottom: 10,
+    padding: 12,
+  },
+  itemMainRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 12,
   },
   itemIconBadge: {
@@ -996,6 +1219,34 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
   },
+  quickActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  quickPillBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  quickPillText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  moreIconBtn: {
+    padding: 4,
+    paddingHorizontal: 8,
+  },
   actionCircle: {
     width: 36,
     height: 36,
@@ -1005,10 +1256,62 @@ const styles = StyleSheet.create({
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
+  },
+  actionSheetCard: {
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: 22,
+    padding: 20,
+    borderWidth: 1,
+    gap: 12,
+  },
+  actionSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 6,
+  },
+  sheetMediaIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  actionSheetTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  actionSheetSub: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  sheetOptionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  sheetOptionIconBox: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sheetOptionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  sheetOptionDesc: {
+    fontSize: 12,
+    marginTop: 2,
   },
   authModalCard: {
     width: '100%',

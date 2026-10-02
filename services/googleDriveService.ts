@@ -190,13 +190,11 @@ export function extractDriveFileId(input: string): string | null {
 }
 
 /**
- * Builds a direct download / stream URL with token parameter or alt=media for Google Drive files.
+ * Builds the official Google Drive direct media URL.
+ * Requests must supply 'Authorization: Bearer <token>' header for authentication.
  */
-export function buildDriveDownloadUrl(fileId: string, accessToken?: string): string {
-  if (accessToken) {
-    return `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&access_token=${accessToken}`;
-  }
-  return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+export function buildDriveDownloadUrl(fileId: string): string {
+  return `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
 }
 
 /**
@@ -249,6 +247,13 @@ export async function fetchDriveItems(folderId?: string): Promise<{
   const items: DriveItem[] = rawFiles.map((file) => {
     const kind = detectMediaKind(file.mimeType, file.name);
     const isFolder = kind === 'folder';
+
+    // For images, thumbnailLink can be upgraded to high resolution (=s1600)
+    let highResThumb = file.thumbnailLink;
+    if (highResThumb && kind === 'image') {
+      highResThumb = highResThumb.replace(/=s\d+/, '=s1600');
+    }
+
     return {
       id: file.id,
       name: file.name,
@@ -256,8 +261,8 @@ export async function fetchDriveItems(folderId?: string): Promise<{
       kind,
       sizeBytes: file.size ? parseInt(file.size, 10) : undefined,
       mimeType: file.mimeType,
-      downloadUrl: buildDriveDownloadUrl(file.id, accessToken),
-      thumbnailUrl: file.thumbnailLink,
+      downloadUrl: buildDriveDownloadUrl(file.id),
+      thumbnailUrl: highResThumb || file.thumbnailLink,
       source: 'google_drive',
       parentId: file.parents && file.parents.length > 0 ? file.parents[0] : undefined,
     };
