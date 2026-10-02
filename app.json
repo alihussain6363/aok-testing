@@ -23,7 +23,10 @@
       "permissions": [
         "INTERNET",
         "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
+        "WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET"
       ]
     },
     "web": {
@@ -48,9 +51,11 @@
       "typedRoutes": true
     },
     "extra": {
+      "router": {},
       "eas": {
-        "projectId": "583a3a9f-402b-409c-9734-3724c837556b"
+        "projectId": "79aa6e31-b6eb-45fc-aa9b-9d74247b6acf"
       }
-    }
+    },
+    "owner": "noman.b7788"
   }
 }
