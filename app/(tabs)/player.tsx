@@ -14,7 +14,7 @@ import {
   type PanResponderGestureState,
   BackHandler,
 } from 'react-native';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import { useVideoPlayer, VideoView, type AudioTrack } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -67,6 +67,11 @@ export default function PlayerScreen() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectedQuality, setSelectedQuality] = useState<VideoQuality>('Original (HD)');
   const [showQualityModal, setShowQualityModal] = useState(false);
+
+  // Audio Track States
+  const [availableAudioTracks, setAvailableAudioTracks] = useState<AudioTrack[]>([]);
+  const [currentAudioTrack, setCurrentAudioTrack] = useState<AudioTrack | null>(null);
+  const [showAudioTrackModal, setShowAudioTrackModal] = useState(false);
 
   // Resume Playback States
   const [resumePromptPos, setResumePromptPos] = useState<number | null>(null);
@@ -219,6 +224,147 @@ export default function PlayerScreen() {
       subStatus.remove();
     };
   }, [player, duration, currentTime, currentVideo, activeFolderPlaylist.length, playNextVideoInFolder, refreshRecentHistory]);
+
+  // Synchronize available audio tracks and active track from player
+  const syncAudioTracks = useCallback(() => {
+    if (!player) return;
+    try {
+      const tracks = player.availableAudioTracks || [];
+      setAvailableAudioTracks(tracks);
+      if (player.audioTrack) {
+        setCurrentAudioTrack(player.audioTrack);
+      } else if (tracks.length > 0) {
+        setCurrentAudioTrack(tracks[0]);
+      }
+    } catch (err) {
+      console.warn('Error reading audio tracks:', err);
+    }
+  }, [player]);
+
+  useEffect(() => {
+    if (!player) return;
+
+    // Initial check
+    syncAudioTracks();
+
+    // Listen to changes in available audio tracks (demuxed by ExoPlayer)
+    const subTracks = player.addListener('availableAudioTracksChange', (event) => {
+      if (event.availableAudioTracks) {
+        setAvailableAudioTracks(event.availableAudioTracks);
+        if (player.audioTrack) {
+          setCurrentAudioTrack(player.audioTrack);
+        } else if (event.availableAudioTracks.length > 0) {
+          setCurrentAudioTrack(event.availableAudioTracks[0]);
+        }
+      }
+    });
+
+    // Listen to audio track selection changes
+    const subAudioChange = player.addListener('audioTrackChange', (event) => {
+      if (event.audioTrack) {
+        setCurrentAudioTrack(event.audioTrack);
+      }
+    });
+
+    // Check again when video is ready to play
+    const subStatusAudio = player.addListener('statusChange', (event) => {
+      if (event.status === 'readyToPlay') {
+        syncAudioTracks();
+      }
+    });
+
+    return () => {
+      subTracks.remove();
+      subAudioChange.remove();
+      subStatusAudio.remove();
+    };
+  }, [player, syncAudioTracks]);
+
+  // Helper to format friendly audio track label with language name
+  const getAudioTrackDisplayName = (track: AudioTrack | null, index: number): string => {
+    if (!track) return `Audio Track ${index + 1}`;
+    if (track.label && track.label.trim()) return track.label.trim();
+    if (track.name && track.name.trim()) return track.name.trim();
+
+    if (track.language && track.language !== 'und') {
+      const langMap: Record<string, string> = {
+        en: 'English',
+        eng: 'English',
+        es: 'Spanish',
+        spa: 'Spanish',
+        hi: 'Hindi',
+        hin: 'Hindi',
+        ja: 'Japanese',
+        jpn: 'Japanese',
+        ko: 'Korean',
+        kor: 'Korean',
+        fr: 'French',
+        fra: 'French',
+        fre: 'French',
+        de: 'German',
+        deu: 'German',
+        ger: 'German',
+        it: 'Italian',
+        ita: 'Italian',
+        pt: 'Portuguese',
+        por: 'Portuguese',
+        ru: 'Russian',
+        rus: 'Russian',
+        zh: 'Chinese',
+        zho: 'Chinese',
+        chi: 'Chinese',
+        ar: 'Arabic',
+        ara: 'Arabic',
+        ur: 'Urdu',
+        urd: 'Urdu',
+        bn: 'Bengali',
+        ben: 'Bengali',
+        ta: 'Tamil',
+        tam: 'Tamil',
+        te: 'Telugu',
+        tel: 'Telugu',
+        tr: 'Turkish',
+        tur: 'Turkish',
+        vi: 'Vietnamese',
+        vie: 'Vietnamese',
+        id: 'Indonesian',
+        ind: 'Indonesian',
+      };
+      const code = track.language.toLowerCase();
+      const mapped = langMap[code];
+      if (mapped) return `${mapped} (${code.toUpperCase()})`;
+      return `Language: ${track.language.toUpperCase()}`;
+    }
+
+    return `Audio Track ${index + 1}`;
+  };
+
+  const isAudioTrackActive = (track: AudioTrack, index: number): boolean => {
+    if (!currentAudioTrack) return index === 0;
+    if (track.id && currentAudioTrack.id) return track.id === currentAudioTrack.id;
+    return (
+      track.language === currentAudioTrack.language &&
+      track.label === currentAudioTrack.label &&
+      track.name === currentAudioTrack.name
+    );
+  };
+
+  const handleSelectAudioTrack = (track: AudioTrack) => {
+    if (!player) return;
+    try {
+      player.audioTrack = track;
+      setCurrentAudioTrack(track);
+    } catch (e) {
+      console.warn('Failed to switch audio track:', e);
+    }
+    setShowAudioTrackModal(false);
+  };
+
+  const openAudioTrackModal = () => {
+    resetControlsTimer();
+    syncAudioTracks();
+    setShowAudioTrackModal(true);
+  };
 
   // Hardware Android Back button handling
   useEffect(() => {
@@ -523,6 +669,33 @@ export default function PlayerScreen() {
 
               {/* Right Action Icons */}
               <View style={styles.overlayRightIcons}>
+                {/* Audio Track Selector Chip */}
+                <TouchableOpacity
+                  onPress={openAudioTrackModal}
+                  style={[
+                    styles.overlayChipBtn,
+                    { borderColor: availableAudioTracks.length > 1 ? '#c084fc' : 'rgba(255, 255, 255, 0.4)' },
+                    availableAudioTracks.length > 1 && { backgroundColor: 'rgba(192, 132, 252, 0.25)' },
+                  ]}
+                  activeOpacity={0.7}>
+                  <Ionicons
+                    name="musical-notes"
+                    size={14}
+                    color={availableAudioTracks.length > 1 ? '#c084fc' : '#ffffff'}
+                  />
+                  <Text
+                    style={[
+                      styles.overlayChipText,
+                      { color: availableAudioTracks.length > 1 ? '#c084fc' : '#ffffff' },
+                    ]}>
+                    {availableAudioTracks.length > 1
+                      ? (currentAudioTrack?.language && currentAudioTrack.language !== 'und'
+                          ? currentAudioTrack.language.toUpperCase()
+                          : `${availableAudioTracks.length} Audio`)
+                      : 'Audio'}
+                  </Text>
+                </TouchableOpacity>
+
                 {/* Quality Selector Chip */}
                 <TouchableOpacity
                   onPress={() => setShowQualityModal(true)}
@@ -631,6 +804,21 @@ export default function PlayerScreen() {
                     <Text style={styles.speedChipText}>{playbackSpeed}x</Text>
                   </TouchableOpacity>
 
+                  {/* Audio Track Quick Selector */}
+                  <TouchableOpacity
+                    onPress={openAudioTrackModal}
+                    style={[
+                      styles.overlayIconBtn,
+                      availableAudioTracks.length > 1 && { backgroundColor: 'rgba(192, 132, 252, 0.3)' },
+                    ]}
+                    activeOpacity={0.7}>
+                    <Ionicons
+                      name="musical-notes"
+                      size={20}
+                      color={availableAudioTracks.length > 1 ? '#c084fc' : '#ffffff'}
+                    />
+                  </TouchableOpacity>
+
                   {/* Volume Mute */}
                   <TouchableOpacity onPress={toggleMute} style={styles.overlayIconBtn}>
                     <Ionicons
@@ -653,224 +841,123 @@ export default function PlayerScreen() {
     );
   };
 
-  return (
-    <View style={[styles.screenWrapper, { backgroundColor: theme.background }]}>
-      <StatusBar hidden={isFullscreen} />
-
-      {/* 100% TRUE FULLSCREEN MODAL (0% APP VISIBILITY) */}
+  // Render Audio & Quality Selection Bottom Sheets
+  const renderAudioAndQualityModals = () => (
+    <>
+      {/* Audio Track Switcher Modal */}
       <Modal
-        visible={isFullscreen}
-        transparent={false}
+        visible={showAudioTrackModal}
+        transparent
+        statusBarTranslucent
         animationType="fade"
-        hardwareAccelerated
-        onRequestClose={() => setIsFullscreen(false)}>
-        {renderVideoViewport(true)}
+        onRequestClose={() => setShowAudioTrackModal(false)}>
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setShowAudioTrackModal(false)}>
+          <View
+            style={[styles.audioSheet, { backgroundColor: theme.cardBackground }]}
+            onStartShouldSetResponder={() => true}>
+            {/* Header */}
+            <View style={styles.audioSheetHeader}>
+              <View style={[styles.audioSheetIconCircle, { backgroundColor: 'rgba(192, 132, 252, 0.2)' }]}>
+                <Ionicons name="musical-notes" size={24} color="#c084fc" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.audioSheetTitle, { color: theme.text }]}>Audio Tracks & Languages</Text>
+                <Text style={[styles.audioSheetSubtitle, { color: theme.textSecondary }]}>
+                  {availableAudioTracks.length > 1
+                    ? `${availableAudioTracks.length} audio tracks available in this video`
+                    : 'Select your preferred audio stream'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setShowAudioTrackModal(false)}
+                style={styles.modalCloseBtn}
+                activeOpacity={0.7}>
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* List of Audio Tracks */}
+            {availableAudioTracks.length > 0 ? (
+              <ScrollView style={{ maxHeight: 320 }} showsVerticalScrollIndicator={false}>
+                {availableAudioTracks.map((track, idx) => {
+                  const isActive = isAudioTrackActive(track, idx);
+                  const displayName = getAudioTrackDisplayName(track, idx);
+
+                  return (
+                    <TouchableOpacity
+                      key={track.id || `audio_track_${idx}`}
+                      style={[
+                        styles.audioOptionItem,
+                        {
+                          backgroundColor: isActive ? 'rgba(192, 132, 252, 0.15)' : theme.cardBorder,
+                          borderColor: isActive ? '#c084fc' : 'transparent',
+                        },
+                      ]}
+                      onPress={() => handleSelectAudioTrack(track)}
+                      activeOpacity={0.7}>
+                      <Ionicons
+                        name={isActive ? 'checkmark-circle' : 'ellipse-outline'}
+                        size={22}
+                        color={isActive ? '#c084fc' : theme.textSecondary}
+                      />
+
+                      <View style={{ flex: 1, marginLeft: 12 }}>
+                        <Text
+                          style={[
+                            styles.audioOptionTitle,
+                            { color: isActive ? '#c084fc' : theme.text, fontWeight: isActive ? '700' : '600' },
+                          ]}>
+                          {displayName}
+                        </Text>
+                        <Text style={[styles.audioOptionSub, { color: theme.textSecondary }]}>
+                          Track #{idx + 1}
+                          {track.language && track.language !== 'und' ? ` • ${track.language.toUpperCase()}` : ''}
+                          {track.name && track.name !== displayName ? ` • ${track.name}` : ''}
+                        </Text>
+                      </View>
+
+                      {track.isDefault && (
+                        <View style={[styles.audioBadge, { backgroundColor: 'rgba(56, 189, 248, 0.2)' }]}>
+                          <Text style={[styles.audioBadgeText, { color: '#38bdf8' }]}>Default</Text>
+                        </View>
+                      )}
+
+                      {isActive && (
+                        <View style={[styles.audioBadge, { backgroundColor: '#c084fc' }]}>
+                          <Text style={[styles.audioBadgeText, { color: '#0a0a0c' }]}>Active</Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            ) : (
+              <View style={styles.noTracksBox}>
+                <Ionicons name="volume-medium-outline" size={36} color={theme.textSecondary} />
+                <Text style={[styles.noTracksTitle, { color: theme.text }]}>
+                  Single Audio Stream
+                </Text>
+                <Text style={[styles.noTracksDesc, { color: theme.textSecondary }]}>
+                  This video is currently playing its embedded audio stream. If this file has multiple audio languages, tap below to re-detect.
+                </Text>
+                <TouchableOpacity
+                  style={[styles.reScanBtn, { backgroundColor: theme.primary }]}
+                  onPress={syncAudioTracks}
+                  activeOpacity={0.8}>
+                  <Ionicons name="refresh" size={16} color="#fff" />
+                  <Text style={styles.reScanBtnText}>Re-scan Audio Tracks</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        </TouchableOpacity>
       </Modal>
 
-      {/* Standard In-App Viewport */}
-      {!isFullscreen && renderVideoViewport(false)}
-
-      {/* Scrollable Information, History, and Folder Queue */}
-      {!isFullscreen && (
-        <ScrollView
-          style={styles.scrollDetails}
-          contentContainerStyle={{ paddingBottom: insets.bottom + 36 }}>
-          {/* Background Caching Indicator */}
-          {downloadState.isDownloading && (
-            <View style={[styles.cachingBanner, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
-              <Ionicons name="cloud-download" size={20} color={theme.primary} />
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.cachingTitle, { color: theme.text }]}>
-                  Caching for offline smoothness ({downloadState.progressPercent}%)
-                </Text>
-                <View style={styles.cachingBarBg}>
-                  <View style={[styles.cachingBarFill, { width: `${downloadState.progressPercent}%` }]} />
-                </View>
-              </View>
-            </View>
-          )}
-
-          {/* Video Information & Local Storage Status */}
-          <View style={[styles.detailsCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
-            <View style={styles.detailsHeaderRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.videoTitle, { color: theme.text }]} numberOfLines={2}>
-                  {currentVideo.title}
-                </Text>
-                <View style={styles.metaRow}>
-                  <View style={[styles.statusBadge, { backgroundColor: isLocalOnDisk ? theme.successLight : theme.primaryLight }]}>
-                    <Ionicons name={isLocalOnDisk ? 'checkmark-circle' : 'cloud-outline'} size={14} color={isLocalOnDisk ? theme.success : theme.primary} />
-                    <Text style={[styles.statusBadgeText, { color: isLocalOnDisk ? theme.success : theme.primary }]}>
-                      {isLocalOnDisk ? 'Saved in Device Storage' : 'Streaming from Google Drive'}
-                    </Text>
-                  </View>
-                  {currentVideo.sizeBytes ? (
-                    <Text style={[styles.sizeText, { color: theme.textSecondary }]}>
-                      {formatBytes(currentVideo.sizeBytes)}
-                    </Text>
-                  ) : null}
-                </View>
-              </View>
-
-              {/* Delete from phone button */}
-              {isLocalOnDisk && (
-                <TouchableOpacity
-                  style={[styles.deleteButton, { backgroundColor: theme.dangerLight, borderColor: theme.danger }]}
-                  onPress={async () => {
-                    Alert.alert(
-                      'Delete Local File',
-                      `Are you sure you want to delete "${currentVideo.title}" from your phone's memory? (It will NEVER be deleted from your Google Drive)`,
-                      [
-                        { text: 'Cancel', style: 'cancel' },
-                        {
-                          text: 'Delete from Phone',
-                          style: 'destructive',
-                          onPress: async () => {
-                            if (player) player.pause();
-                            await deleteCurrentVideoNow();
-                          },
-                        },
-                      ]
-                    );
-                  }}
-                  activeOpacity={0.7}>
-                  <Ionicons name="trash-outline" size={16} color={theme.danger} />
-                  <Text style={[styles.deleteButtonText, { color: theme.danger }]}>Delete Local</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
-
-          {/* Section: Recently Watched (Last 3 Videos with Resume) */}
-          {recentVideos.length > 0 && (
-            <View style={styles.sectionBox}>
-              <View style={styles.sectionHeaderRow}>
-                <Ionicons name="time-outline" size={20} color={theme.primary} />
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>
-                  Recently Watched (Continue Watching)
-                </Text>
-              </View>
-
-              {recentVideos.slice(0, 3).map((item) => {
-                const isCurrent = currentVideo.id === item.id;
-                return (
-                  <TouchableOpacity
-                    key={item.id}
-                    style={[
-                      styles.recentCard,
-                      {
-                        backgroundColor: isCurrent ? theme.primaryLight : theme.cardBackground,
-                        borderColor: isCurrent ? theme.primary : theme.cardBorder,
-                      },
-                    ]}
-                    onPress={() => {
-                      requestPlayVideo(
-                        {
-                          id: item.id,
-                          name: item.title,
-                          isFolder: false,
-                          kind: 'video',
-                          downloadUrl: item.localUri,
-                          thumbnailUrl: item.thumbnailUrl,
-                          source: 'google_drive',
-                        },
-                        activeFolderPlaylist,
-                        'stream'
-                      );
-                    }}
-                    activeOpacity={0.7}>
-                    <View style={[styles.recentIconBox, { backgroundColor: isCurrent ? '#0284c7' : 'rgba(255, 255, 255, 0.08)' }]}>
-                      <Ionicons name="play" size={18} color="#fff" />
-                    </View>
-
-                    <View style={{ flex: 1 }}>
-                      <Text
-                        style={[
-                          styles.recentTitle,
-                          { color: isCurrent ? theme.primary : theme.text, fontWeight: isCurrent ? '700' : '600' },
-                        ]}
-                        numberOfLines={1}>
-                        {item.title}
-                      </Text>
-                      <Text style={[styles.recentSub, { color: theme.textSecondary }]}>
-                        {item.progressPercent}% watched • {formatSeconds(item.positionSeconds)} of {formatSeconds(item.durationSeconds)}
-                      </Text>
-                      {/* Mini Progress Bar */}
-                      <View style={styles.miniProgressBg}>
-                        <View style={[styles.miniProgressFill, { width: `${item.progressPercent}%` }]} />
-                      </View>
-                    </View>
-
-                    <View style={[styles.resumeChip, { backgroundColor: theme.primary }]}>
-                      <Text style={styles.resumeChipText}>Resume</Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-
-          {/* Section: Folder Video Playlist */}
-          <View style={styles.sectionBox}>
-            <View style={styles.sectionHeaderRow}>
-              <Ionicons name="albums-outline" size={20} color={theme.primary} />
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>
-                {activeFolderPlaylist.length > 0
-                  ? `Folder Playlist (${activeFolderIndex + 1} of ${activeFolderPlaylist.length})`
-                  : 'Sample Video Queue'}
-              </Text>
-            </View>
-
-            {playlistToDisplay.map((item, idx) => {
-              const itemId = 'id' in item ? item.id : '';
-              const itemName = 'name' in item ? item.name : (item as any).title;
-              const itemSize = item.sizeBytes ? formatBytes(item.sizeBytes) : undefined;
-              const isCurrent = currentVideo.id === itemId;
-
-              return (
-                <TouchableOpacity
-                  key={itemId || `item_${idx}`}
-                  style={[
-                    styles.playlistCard,
-                    {
-                      backgroundColor: isCurrent ? theme.primaryLight : theme.cardBackground,
-                      borderColor: isCurrent ? theme.primary : theme.cardBorder,
-                    },
-                  ]}
-                  onPress={() => requestPlayVideo(item, activeFolderPlaylist, 'stream')}
-                  activeOpacity={0.7}>
-                  <Ionicons
-                    name={isCurrent ? 'radio-button-on' : 'play-circle-outline'}
-                    size={22}
-                    color={isCurrent ? theme.primary : theme.textSecondary}
-                  />
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={[
-                        styles.playlistTitle,
-                        { color: isCurrent ? theme.primary : theme.text, fontWeight: isCurrent ? '700' : '500' },
-                      ]}
-                      numberOfLines={1}>
-                      {itemName}
-                    </Text>
-                    <Text style={[styles.playlistSub, { color: theme.textSecondary }]}>
-                      {isCurrent ? '▶ Currently Playing' : itemSize ? `Size: ${itemSize}` : 'Drive Video'}
-                    </Text>
-                  </View>
-                  {isCurrent && (
-                    <View style={styles.activePill}>
-                      <Text style={styles.activePillText}>Active</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </ScrollView>
-      )}
-
       {/* Quality Switcher Modal */}
-      <Modal visible={showQualityModal} transparent animationType="fade" onRequestClose={() => setShowQualityModal(false)}>
+      <Modal visible={showQualityModal} transparent statusBarTranslucent animationType="fade" onRequestClose={() => setShowQualityModal(false)}>
         <TouchableOpacity
           style={styles.modalOverlay}
           activeOpacity={1}
@@ -916,6 +1003,261 @@ export default function PlayerScreen() {
           </View>
         </TouchableOpacity>
       </Modal>
+    </>
+  );
+
+  return (
+    <View style={[styles.screenWrapper, { backgroundColor: theme.background }]}>
+      <StatusBar hidden={isFullscreen} />
+
+      {/* 100% TRUE FULLSCREEN MODAL (0% APP VISIBILITY) */}
+      <Modal
+        visible={isFullscreen}
+        transparent={false}
+        animationType="fade"
+        hardwareAccelerated
+        onRequestClose={() => setIsFullscreen(false)}>
+        {isFullscreen && (
+          <>
+            {renderVideoViewport(true)}
+            {renderAudioAndQualityModals()}
+          </>
+        )}
+      </Modal>
+
+      {/* Standard In-App Viewport */}
+      {!isFullscreen && (
+        <>
+          {renderVideoViewport(false)}
+
+          {/* Scrollable Information, History, and Folder Queue */}
+          <ScrollView
+            style={styles.scrollDetails}
+            contentContainerStyle={{ paddingBottom: insets.bottom + 36 }}>
+            {/* Background Caching Indicator */}
+            {downloadState.isDownloading && (
+              <View style={[styles.cachingBanner, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
+                <Ionicons name="cloud-download" size={20} color={theme.primary} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.cachingTitle, { color: theme.text }]}>
+                    Caching for offline smoothness ({downloadState.progressPercent}%)
+                  </Text>
+                  <View style={styles.cachingBarBg}>
+                    <View style={[styles.cachingBarFill, { width: `${downloadState.progressPercent}%` }]} />
+                  </View>
+                </View>
+              </View>
+            )}
+
+            {/* Video Information & Local Storage Status */}
+            <View style={[styles.detailsCard, { backgroundColor: theme.cardBackground, borderColor: theme.cardBorder }]}>
+              <View style={styles.detailsHeaderRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.videoTitle, { color: theme.text }]} numberOfLines={2}>
+                    {currentVideo.title}
+                  </Text>
+                  <View style={styles.metaRow}>
+                    <View style={[styles.statusBadge, { backgroundColor: isLocalOnDisk ? theme.successLight : theme.primaryLight }]}>
+                      <Ionicons name={isLocalOnDisk ? 'checkmark-circle' : 'cloud-outline'} size={14} color={isLocalOnDisk ? theme.success : theme.primary} />
+                      <Text style={[styles.statusBadgeText, { color: isLocalOnDisk ? theme.success : theme.primary }]}>
+                        {isLocalOnDisk ? 'Saved in Device Storage' : 'Streaming from Google Drive'}
+                      </Text>
+                    </View>
+
+                    {/* Multi-Audio Track badge & quick picker */}
+                    <TouchableOpacity
+                      style={[
+                        styles.statusBadge,
+                        {
+                          backgroundColor: availableAudioTracks.length > 1 ? 'rgba(192, 132, 252, 0.15)' : 'rgba(255, 255, 255, 0.06)',
+                          borderColor: availableAudioTracks.length > 1 ? '#c084fc' : theme.cardBorder,
+                          borderWidth: 1,
+                        },
+                      ]}
+                      onPress={openAudioTrackModal}
+                      activeOpacity={0.7}>
+                      <Ionicons
+                        name="musical-notes"
+                        size={14}
+                        color={availableAudioTracks.length > 1 ? '#c084fc' : theme.textSecondary}
+                      />
+                      <Text
+                        style={[
+                          styles.statusBadgeText,
+                          { color: availableAudioTracks.length > 1 ? '#c084fc' : theme.textSecondary },
+                        ]}>
+                        {availableAudioTracks.length > 1
+                          ? `Audio: ${getAudioTrackDisplayName(currentAudioTrack || availableAudioTracks[0], 0)} (${availableAudioTracks.length} tracks)`
+                          : `Audio: ${currentAudioTrack ? getAudioTrackDisplayName(currentAudioTrack, 0) : 'Standard'}`}
+                      </Text>
+                    </TouchableOpacity>
+
+                    {currentVideo.sizeBytes ? (
+                      <Text style={[styles.sizeText, { color: theme.textSecondary }]}>
+                        {formatBytes(currentVideo.sizeBytes)}
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
+
+                {/* Delete from phone button */}
+                {isLocalOnDisk && (
+                  <TouchableOpacity
+                    style={[styles.deleteButton, { backgroundColor: theme.dangerLight, borderColor: theme.danger }]}
+                    onPress={async () => {
+                      Alert.alert(
+                        'Delete Local File',
+                        `Are you sure you want to delete "${currentVideo.title}" from your phone's memory? (It will NEVER be deleted from your Google Drive)`,
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Delete from Phone',
+                            style: 'destructive',
+                            onPress: async () => {
+                              if (player) player.pause();
+                              await deleteCurrentVideoNow();
+                            },
+                          },
+                        ]
+                      );
+                    }}
+                    activeOpacity={0.7}>
+                    <Ionicons name="trash-outline" size={16} color={theme.danger} />
+                    <Text style={[styles.deleteButtonText, { color: theme.danger }]}>Delete Local</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+
+            {/* Section: Recently Watched (Last 3 Videos with Resume) */}
+            {recentVideos.length > 0 && (
+              <View style={styles.sectionBox}>
+                <View style={styles.sectionHeaderRow}>
+                  <Ionicons name="time-outline" size={20} color={theme.primary} />
+                  <Text style={[styles.sectionTitle, { color: theme.text }]}>
+                    Recently Watched (Continue Watching)
+                  </Text>
+                </View>
+
+                {recentVideos.slice(0, 3).map((item) => {
+                  const isCurrent = currentVideo.id === item.id;
+                  return (
+                    <TouchableOpacity
+                      key={item.id}
+                      style={[
+                        styles.recentCard,
+                        {
+                          backgroundColor: isCurrent ? theme.primaryLight : theme.cardBackground,
+                          borderColor: isCurrent ? theme.primary : theme.cardBorder,
+                        },
+                      ]}
+                      onPress={() => {
+                        requestPlayVideo(
+                          {
+                            id: item.id,
+                            name: item.title,
+                            isFolder: false,
+                            kind: 'video',
+                            downloadUrl: item.localUri,
+                            thumbnailUrl: item.thumbnailUrl,
+                            source: 'google_drive',
+                          },
+                          activeFolderPlaylist,
+                          'stream'
+                        );
+                      }}
+                      activeOpacity={0.7}>
+                      <View style={[styles.recentIconBox, { backgroundColor: isCurrent ? '#0284c7' : 'rgba(255, 255, 255, 0.08)' }]}>
+                        <Ionicons name="play" size={18} color="#fff" />
+                      </View>
+
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={[
+                            styles.recentTitle,
+                            { color: isCurrent ? theme.primary : theme.text, fontWeight: isCurrent ? '700' : '600' },
+                          ]}>
+                          {item.title}
+                        </Text>
+                        <Text style={[styles.recentSub, { color: theme.textSecondary }]}>
+                          {item.progressPercent}% watched • {formatSeconds(item.positionSeconds)} of {formatSeconds(item.durationSeconds)}
+                        </Text>
+                        {/* Mini Progress Bar */}
+                        <View style={styles.miniProgressBg}>
+                          <View style={[styles.miniProgressFill, { width: `${item.progressPercent}%` }]} />
+                        </View>
+                      </View>
+
+                      <View style={[styles.resumeChip, { backgroundColor: theme.primary }]}>
+                        <Text style={styles.resumeChipText}>Resume</Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Section: Folder Video Playlist */}
+            <View style={styles.sectionBox}>
+              <View style={styles.sectionHeaderRow}>
+                <Ionicons name="albums-outline" size={20} color={theme.primary} />
+                <Text style={[styles.sectionTitle, { color: theme.text }]}>
+                  {activeFolderPlaylist.length > 0
+                    ? `Folder Playlist (${activeFolderIndex + 1} of ${activeFolderPlaylist.length})`
+                    : 'Sample Video Queue'}
+                </Text>
+              </View>
+
+              {playlistToDisplay.map((item, idx) => {
+                const itemId = 'id' in item ? item.id : '';
+                const itemName = 'name' in item ? item.name : (item as any).title;
+                const itemSize = item.sizeBytes ? formatBytes(item.sizeBytes) : undefined;
+                const isCurrent = currentVideo.id === itemId;
+
+                return (
+                  <TouchableOpacity
+                    key={itemId || `item_${idx}`}
+                    style={[
+                      styles.playlistCard,
+                      {
+                        backgroundColor: isCurrent ? theme.primaryLight : theme.cardBackground,
+                        borderColor: isCurrent ? theme.primary : theme.cardBorder,
+                      },
+                    ]}
+                    onPress={() => requestPlayVideo(item, activeFolderPlaylist, 'stream')}
+                    activeOpacity={0.7}>
+                    <Ionicons
+                      name={isCurrent ? 'radio-button-on' : 'play-circle-outline'}
+                      size={22}
+                      color={isCurrent ? theme.primary : theme.textSecondary}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[
+                          styles.playlistTitle,
+                          { color: isCurrent ? theme.primary : theme.text, fontWeight: isCurrent ? '700' : '500' },
+                        ]}
+                        numberOfLines={1}>
+                        {itemName}
+                      </Text>
+                      <Text style={[styles.playlistSub, { color: theme.textSecondary }]}>
+                        {isCurrent ? '▶ Currently Playing' : itemSize ? `Size: ${itemSize}` : 'Drive Video'}
+                      </Text>
+                    </View>
+                    {isCurrent && (
+                      <View style={styles.activePill}>
+                        <Text style={styles.activePillText}>Active</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </ScrollView>
+
+          {renderAudioAndQualityModals()}
+        </>
+      )}
     </View>
   );
 }
@@ -1409,5 +1751,95 @@ const styles = StyleSheet.create({
     color: '#0a0a0c',
     fontSize: 11,
     fontWeight: '700',
+  },
+  audioSheet: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
+  },
+  audioSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 20,
+  },
+  audioSheetIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  audioSheetTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  audioSheetSubtitle: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  modalCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  audioOptionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    marginBottom: 10,
+  },
+  audioOptionTitle: {
+    fontSize: 15,
+  },
+  audioOptionSub: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  audioBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  audioBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  noTracksBox: {
+    paddingVertical: 24,
+    alignItems: 'center',
+    gap: 8,
+  },
+  noTracksTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    marginTop: 6,
+  },
+  noTracksDesc: {
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
+    paddingHorizontal: 16,
+  },
+  reScanBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 20,
+    marginTop: 12,
+  },
+  reScanBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '600',
   },
 });
