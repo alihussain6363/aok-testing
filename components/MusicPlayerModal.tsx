@@ -5,13 +5,13 @@ import {
   Text,
   Modal,
   TouchableOpacity,
-  Dimensions,
   ActivityIndicator,
   Alert,
   FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SeekBar } from '@/components/SeekBar';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { type DriveItem } from '@/services/googleDriveService';
 import { downloadMediaToLocal, formatBytes } from '@/services/downloadManager';
@@ -38,6 +38,7 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [scrubPreview, setScrubPreview] = useState<number | null>(null);
   const [isLooping, setIsLooping] = useState(false);
   const [isShuffle, setIsShuffle] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -65,6 +66,8 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
   // Initialize expo-video player for audio playback
   const player = useVideoPlayer(currentTrack ? (getAudioSource(currentTrack) as any) : null, (p) => {
     p.loop = isLooping;
+    // timeUpdate events are disabled by default (interval 0) — without this the timer and progress bar never move
+    p.timeUpdateEventInterval = 0.25;
     p.play();
   });
 
@@ -72,6 +75,8 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
   useEffect(() => {
     if (player && currentTrack && visible) {
       const src = getAudioSource(currentTrack);
+      setCurrentTime(0);
+      setDuration(0);
       player.replace(src as any);
       player.play();
       setIsPlaying(true);
@@ -82,6 +87,12 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
   useEffect(() => {
     if (!player) return;
     player.loop = isLooping;
+
+    const subSourceLoad = player.addListener('sourceLoad', (event) => {
+      if (event.duration > 0) {
+        setDuration(event.duration);
+      }
+    });
 
     const subStatus = player.addListener('statusChange', ({ status }) => {
       setIsPlaying(status === 'readyToPlay' && player.playing);
@@ -99,6 +110,7 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
     });
 
     return () => {
+      subSourceLoad.remove();
       subStatus.remove();
       subPlaying.remove();
       subTime.remove();
@@ -138,10 +150,11 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
     onTrackChange?.(prevIdx);
   };
 
-  const handleSeek = (ratio: number) => {
+  const handleSeek = (seconds: number) => {
     if (!player || duration <= 0) return;
-    const target = Math.max(0, Math.min(duration, ratio * duration));
+    const target = Math.max(0, Math.min(duration, seconds));
     player.currentTime = target;
+    setCurrentTime(target);
   };
 
   const handleSaveMusic = async () => {
@@ -167,8 +180,6 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
     const s = Math.floor(sec % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
-
-  const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -259,18 +270,14 @@ export const MusicPlayerModal: React.FC<MusicPlayerModalProps> = ({
 
             {/* Progress Slider */}
             <View style={styles.progressContainer}>
-              <TouchableOpacity
-                activeOpacity={1}
-                style={styles.progressBarBg}
-                onPress={(e) => {
-                  const width = Dimensions.get('window').width - 48;
-                  const clickX = e.nativeEvent.locationX;
-                  handleSeek(clickX / width);
-                }}>
-                <View style={[styles.progressBarFill, { width: `${progressPercent}%` }]} />
-              </TouchableOpacity>
+              <SeekBar
+                currentTime={currentTime}
+                duration={duration}
+                onSeek={handleSeek}
+                onScrubChange={setScrubPreview}
+              />
               <View style={styles.timeRow}>
-                <Text style={styles.timeText}>{formatSeconds(currentTime)}</Text>
+                <Text style={styles.timeText}>{formatSeconds(scrubPreview ?? currentTime)}</Text>
                 <Text style={styles.timeText}>{formatSeconds(duration)}</Text>
               </View>
             </View>
@@ -427,17 +434,6 @@ const styles = StyleSheet.create({
   },
   progressContainer: {
     width: '100%',
-  },
-  progressBarBg: {
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
-    overflow: 'hidden',
-  },
-  progressBarFill: {
-    height: '100%',
-    backgroundColor: '#38bdf8',
-    borderRadius: 3,
   },
   timeRow: {
     flexDirection: 'row',

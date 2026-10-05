@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   View,
@@ -29,6 +29,7 @@ import {
 } from '@/services/watchHistoryManager';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
+import { SeekBar } from '@/components/SeekBar';
 
 type VideoQuality = 'Original (HD)' | '1080p' | '720p' | '480p' | 'Auto';
 
@@ -59,6 +60,7 @@ export default function PlayerScreen() {
   const [volume, setVolume] = useState<number>(1.0);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
+  const [scrubPreview, setScrubPreview] = useState<number | null>(null);
   const [contentFit, setContentFit] = useState<'contain' | 'cover'>('contain');
   const [isLocked, setIsLocked] = useState(false);
 
@@ -90,6 +92,13 @@ export default function PlayerScreen() {
   const startPosRef = useRef<number>(currentTime);
   const gestureModeRef = useRef<'none' | 'vertical_right' | 'horizontal'>('none');
   const isGestureActiveRef = useRef<boolean>(false);
+  // Latest values for listeners/gesture handlers that are created once and would otherwise see stale state
+  const currentTimeRef = useRef<number>(0);
+  const durationRef = useRef<number>(0);
+  useLayoutEffect(() => {
+    currentTimeRef.current = currentTime;
+    durationRef.current = duration;
+  });
 
   // Helper to build source with Google Drive auth header
   const buildVideoSource = (video: typeof currentVideo, token: string | null) => {
@@ -110,6 +119,8 @@ export default function PlayerScreen() {
   // Initialize expo-video player
   const player = useVideoPlayer(currentVideo ? (buildVideoSource(currentVideo, authToken) as any) : null, (p) => {
     p.loop = false;
+    // timeUpdate events are disabled by default (interval 0) — without this the timer and progress bar never move
+    p.timeUpdateEventInterval = 0.25;
     p.play();
   });
 
@@ -180,6 +191,13 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (!player) return;
 
+    const subSourceLoad = player.addListener('sourceLoad', (event) => {
+      setCurrentTime(player.currentTime || 0);
+      if (event.duration > 0) {
+        setDuration(event.duration);
+      }
+    });
+
     const subPlaying = player.addListener('playingChange', (event) => {
       setIsPlaying(event.isPlaying);
       if (!event.isPlaying) {
@@ -211,7 +229,8 @@ export default function PlayerScreen() {
 
     const subStatus = player.addListener('statusChange', (event) => {
       // Auto-advance to next video in folder when finished
-      if (event.status === 'idle' && duration > 0 && currentTime >= duration - 1) {
+      const d = durationRef.current;
+      if (event.status === 'idle' && d > 0 && currentTimeRef.current >= d - 1) {
         if (activeFolderPlaylist.length > 1) {
           playNextVideoInFolder();
         }
@@ -219,11 +238,12 @@ export default function PlayerScreen() {
     });
 
     return () => {
+      subSourceLoad.remove();
       subPlaying.remove();
       subTime.remove();
       subStatus.remove();
     };
-  }, [player, duration, currentTime, currentVideo, activeFolderPlaylist.length, playNextVideoInFolder, refreshRecentHistory]);
+  }, [player, currentVideo, activeFolderPlaylist.length, playNextVideoInFolder, refreshRecentHistory]);
 
   // Synchronize available audio tracks and active track from player
   const syncAudioTracks = useCallback(() => {
@@ -408,12 +428,15 @@ export default function PlayerScreen() {
     resetControlsTimer();
     const target = Math.max(0, Math.min(duration || 1000, player.currentTime + seconds));
     player.currentTime = target;
+    setCurrentTime(target);
   };
 
   const handleSeekTo = (newSeconds: number) => {
     if (!player || isLocked) return;
     resetControlsTimer();
-    player.currentTime = newSeconds;
+    const target = Math.max(0, duration > 0 ? Math.min(duration, newSeconds) : newSeconds);
+    player.currentTime = target;
+    setCurrentTime(target);
   };
 
   const handleVolumeChange = (newVol: number) => {
@@ -468,6 +491,12 @@ export default function PlayerScreen() {
     setResumePromptPos(null);
   };
 
+  // Latest state/handlers for the PanResponder below, which is created only once
+  const gestureLiveRef = useRef({ volume, isLocked, handleSeekTo, seekRelative, handleVolumeChange });
+  useLayoutEffect(() => {
+    gestureLiveRef.current = { volume, isLocked, handleSeekTo, seekRelative, handleVolumeChange };
+  });
+
   // PanResponder for MX Player touch gestures
   const panResponder = useRef(
     PanResponder.create({
@@ -478,11 +507,11 @@ export default function PlayerScreen() {
       onPanResponderGrant: () => {
         isGestureActiveRef.current = false;
         gestureModeRef.current = 'none';
-        startVolumeRef.current = volume;
-        startPosRef.current = currentTime;
+        startVolumeRef.current = gestureLiveRef.current.volume;
+        startPosRef.current = currentTimeRef.current;
       },
       onPanResponderMove: (evt: GestureResponderEvent, gestureState: PanResponderGestureState) => {
-        if (isLocked) return;
+        if (gestureLiveRef.current.isLocked) return;
         const dx = gestureState.dx;
         const dy = gestureState.dy;
 
@@ -501,10 +530,10 @@ export default function PlayerScreen() {
           const newVol = Math.max(0, Math.min(1, startVolumeRef.current + deltaVolume));
           setHudType('volume');
           setHudValue(Math.round(newVol * 100));
-          handleVolumeChange(newVol);
+          gestureLiveRef.current.handleVolumeChange(newVol);
         } else if (gestureModeRef.current === 'horizontal') {
           const deltaSec = Math.round(dx * 0.4);
-          const target = Math.max(0, Math.min(duration || 1000, startPosRef.current + deltaSec));
+          const target = Math.max(0, Math.min(durationRef.current || 1000, startPosRef.current + deltaSec));
           setHudType('seek');
           setSeekDelta(deltaSec);
           setSeekTarget(target);
@@ -514,8 +543,8 @@ export default function PlayerScreen() {
         if (isGestureActiveRef.current) {
           if (gestureModeRef.current === 'horizontal') {
             const deltaSec = Math.round(gestureState.dx * 0.4);
-            const target = Math.max(0, Math.min(duration || 1000, startPosRef.current + deltaSec));
-            handleSeekTo(target);
+            const target = Math.max(0, Math.min(durationRef.current || 1000, startPosRef.current + deltaSec));
+            gestureLiveRef.current.handleSeekTo(target);
           }
           setTimeout(() => setHudType(null), 600);
         } else {
@@ -526,10 +555,10 @@ export default function PlayerScreen() {
             const touchX = evt.nativeEvent.locationX;
             const screenW = Dimensions.get('window').width;
             const isRightSide = touchX > screenW / 2;
-            seekRelative(isRightSide ? 10 : -10);
+            gestureLiveRef.current.seekRelative(isRightSide ? 10 : -10);
             setHudType('seek');
             setSeekDelta(isRightSide ? 10 : -10);
-            setSeekTarget(Math.max(0, currentTime + (isRightSide ? 10 : -10)));
+            setSeekTarget(Math.max(0, currentTimeRef.current + (isRightSide ? 10 : -10)));
             setTimeout(() => setHudType(null), 700);
             lastTapRef.current = 0;
           } else {
@@ -549,8 +578,6 @@ export default function PlayerScreen() {
     const s = Math.floor(sec % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
-
-  const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
 
   // If no video is selected yet
   if (!currentVideo) {
@@ -780,20 +807,18 @@ export default function PlayerScreen() {
               <View style={[styles.overlayBottomBar, isFull && { paddingBottom: insets.bottom + 8 }]}>
                 {/* Scrub Progress Bar */}
                 <View style={styles.timelineRow}>
-                  <Text style={styles.timelineText}>{formatSeconds(currentTime)}</Text>
-                  <TouchableOpacity
-                    activeOpacity={1}
+                  <Text style={styles.timelineText}>{formatSeconds(scrubPreview ?? currentTime)}</Text>
+                  <SeekBar
                     style={styles.scrubTrackBg}
-                    onPress={(e) => {
-                      const screenW = Dimensions.get('window').width;
-                      const trackW = screenW - 140;
-                      const clickX = e.nativeEvent.locationX;
-                      const ratio = Math.max(0, Math.min(1, clickX / trackW));
-                      handleSeekTo(ratio * (duration || 100));
-                    }}>
-                    <View style={[styles.scrubTrackFill, { width: `${progressPercent}%` }]} />
-                    <View style={[styles.scrubThumb, { left: `${Math.max(0, progressPercent - 2)}%` }]} />
-                  </TouchableOpacity>
+                    currentTime={currentTime}
+                    duration={duration}
+                    onSeek={handleSeekTo}
+                    onScrubStart={resetControlsTimer}
+                    onScrubChange={(sec) => {
+                      setScrubPreview(sec);
+                      resetControlsTimer();
+                    }}
+                  />
                   <Text style={styles.timelineText}>{formatSeconds(duration)}</Text>
                 </View>
 
@@ -1388,21 +1413,6 @@ const styles = StyleSheet.create({
   },
   scrubTrackBg: {
     flex: 1,
-    height: 20,
-    justifyContent: 'center',
-  },
-  scrubTrackFill: {
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#38bdf8',
-  },
-  scrubThumb: {
-    position: 'absolute',
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#ffffff',
-    top: 3,
   },
   bottomButtonsRow: {
     flexDirection: 'row',
