@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Drive Video Player",
-    "slug": "almos",
+    "slug": "mobile-app",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
@@ -53,9 +53,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "583a3a9f-402b-409c-9734-3724c837556b"
+        "projectId": "648cc0fa-0805-41a0-9a24-59cc6a58f59b"
       }
     },
-    "owner": "nomanb7788s-team"
+    "owner": "prisonbreak7869s-team"
   }
 }
